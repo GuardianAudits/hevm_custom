@@ -258,8 +258,11 @@ getAbi t = label (Text.unpack (abiTypeSolidity t)) $
 
     AbiArrayDynamicType t' -> do
       AbiUInt _ n <- label "array length" (getAbi (AbiUIntType 256))
-      AbiArrayDynamic t' <$>
-        label "array body" (getAbiSeq (unsafeInto n) (repeat t'))
+      let maxLen = fromIntegral (maxBound :: Int) :: Word256
+      if n > maxLen
+        then fail "array length exceeds maximum Int"
+        else AbiArrayDynamic t' <$>
+          label "array body" (getAbiSeq (unsafeInto n) (repeat t'))
 
     AbiTupleType ts ->
       AbiTuple <$> getAbiSeq (Vector.length ts) (Vector.toList ts)
