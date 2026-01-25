@@ -428,6 +428,10 @@ basicType v =
     , P.string "bytes" $> AbiBytesDynamicType
     , P.string "tuple" $> AbiTupleType v
     , P.string "function" $> AbiFunctionType
+
+    -- Fallback for user-defined types like enums (e.g., Order.OrderType)
+    -- Treat them as uint8 since Solidity enums are stored as uint8
+    , P.try (P.some (P.noneOf ("[]" :: String)) $> AbiUIntType 8)
     ]
 
   where
