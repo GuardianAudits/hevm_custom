@@ -1,8 +1,6 @@
 name: "Check Dependencies"
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 5 * * 1' # At 05:30 AM, only on Monday
   pull_request:
     paths:
       - '.github/workflows/check-dependencies.yml'
