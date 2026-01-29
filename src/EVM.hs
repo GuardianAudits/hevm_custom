@@ -2075,17 +2075,17 @@ cheatActions = Map.fromList
     frameReturnExpr e = finishFrame (FrameReturned e)
     runTrackedCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
     runTrackedCall target calldata actor = do
-      let selector = selectorFromCalldata calldata
+      let sel = selectorFromCalldata calldata
       (success, returndata) <- runLowLevelCall target calldata actor
-      updateCheatCallStats selector success
+      updateCheatCallStats sel success
       pure (success, returndata)
     selectorFromCalldata :: ByteString -> FunctionSelector
     selectorFromCalldata bs
       | BS.length bs < 4 = FunctionSelector 0
       | otherwise = FunctionSelector $ word32 $ BS.unpack $ BS.take 4 bs
     updateCheatCallStats :: FunctionSelector -> Bool -> EVM t ()
-    updateCheatCallStats selector success =
-      #cheatCallStats %= Map.alter (Just . bump) selector
+    updateCheatCallStats sel success =
+      #cheatCallStats %= Map.alter (Just . bump) sel
       where
         bump Nothing = CheatCallStats 1 (if success then 1 else 0) (if success then 0 else 1)
         bump (Just s) = s
