@@ -162,6 +162,7 @@ makeVm o = do
     , currentFork = 0
     , labels = mempty
     , osEnv = mempty
+    , cheatCallStats = mempty
     , freshVar = 0
     , exploreDepth = 0
     , keccakPreImgs = fromList []
@@ -1911,6 +1912,16 @@ cheatActions = Map.fromList
         assign (#state % #overrideCaller) Nothing
         assign (#state % #resetCaller) False
 
+  , action "doFunctionCall(address,bytes,address)" $
+      \sig input -> case decodeBuf [AbiAddressType, AbiBytesDynamicType, AbiAddressType] input of
+        (CAbi [AbiAddress target, AbiBytesDynamic calldata, AbiAddress actor],"") -> do
+          (success, returndata) <- runTrackedCall (LitAddr target) calldata (LitAddr actor)
+          frameReturn $ AbiTuple $ V.fromList
+            [ AbiBool success
+            , AbiBytesDynamic returndata
+            ]
+        _ -> vmError (BadCheatCode "doFunctionCall(address,bytes,address) parameter decoding failed" sig)
+
   , action "createFork(string)" $
       \sig input -> case decodeBuf [AbiStringType] input of
         (CAbi valsArr,"") -> case valsArr of
@@ -2062,6 +2073,77 @@ cheatActions = Map.fromList
     frameReturnBuf buf = frameReturnExpr $ ConcreteBuf buf
     frameReturnExpr :: VMOps t => Expr Buf -> EVM t ()
     frameReturnExpr e = finishFrame (FrameReturned e)
+    runTrackedCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
+    runTrackedCall target calldata actor = do
+      let selector = selectorFromCalldata calldata
+      (success, returndata) <- runLowLevelCall target calldata actor
+      updateCheatCallStats selector success
+      pure (success, returndata)
+    selectorFromCalldata :: ByteString -> FunctionSelector
+    selectorFromCalldata bs
+      | BS.length bs < 4 = FunctionSelector 0
+      | otherwise = FunctionSelector $ word32 $ BS.unpack $ BS.take 4 bs
+    updateCheatCallStats :: FunctionSelector -> Bool -> EVM t ()
+    updateCheatCallStats selector success =
+      #cheatCallStats %= Map.alter (Just . bump) selector
+      where
+        bump Nothing = CheatCallStats 1 (if success then 1 else 0) (if success then 0 else 1)
+        bump (Just s) = s
+          { totalCalls = s.totalCalls + 1
+          , successCalls = s.successCalls + if success then 1 else 0
+          , failedCalls = s.failedCalls + if success then 0 else 1
+          }
+    runLowLevelCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
+    runLowLevelCall target calldata actor = do
+      let ?op = 0xF1 -- CALL
+      assign (#state % #overrideCaller) (Just actor)
+      assign (#state % #resetCaller) True
+      overrideC <- use (#state % #overrideCaller)
+      selfAddr <- use (#state % #contract)
+      vm <- get
+      let this = fromMaybe (internalError "state contract") (Map.lookup selfAddr vm.env.contracts)
+      gasGiven <- use (#state % #gas)
+      callValue <- use (#state % #callvalue)
+      let inOffset = Lit 0
+      let inSize = Lit (fromIntegral (BS.length calldata))
+      let outOffset = Lit 0
+      let outSize = Lit 0
+      copyBytesToMemory (ConcreteBuf calldata) inSize (Lit 0) (Lit 0)
+      let startDepth = length vm.frames
+      let doCall =
+            delegateCall this gasGiven target target callValue inOffset inSize outOffset outSize [] unknownCode $ \callee -> do
+              let from' = fromMaybe selfAddr overrideC
+              zoom #state $ do
+                assign #callvalue callValue
+                assign #caller from'
+                assign #contract callee
+              touchAccount from'
+              touchAccount callee
+              transfer from' callee callValue
+      case maybeLitWordSimp callValue of
+        Just 0 -> doCall
+        _ -> notStatic doCall
+      runUntilDepth startDepth
+      stk <- use (#state % #stack)
+      let success = case stk of
+            (x:_) -> case maybeLitWordSimp x of
+              Just 0 -> False
+              Just _ -> True
+              Nothing -> False
+            _ -> False
+      retExpr <- use (#state % #returndata)
+      retBytes <- case retExpr of
+        ConcreteBuf b -> pure b
+        _ -> do
+          unexpectedSymArg "doFunctionCall returndata must be concrete" [retExpr]
+          pure mempty
+      pure (success, retBytes)
+    runUntilDepth :: (?conf :: Config, VMOps t, Typeable t) => Int -> EVM t ()
+    runUntilDepth targetDepth = do
+      vm <- get
+      if isJust vm.result || length vm.frames <= targetDepth
+        then pure ()
+        else exec1 ?conf >> runUntilDepth targetDepth
     frameRevert :: VMOps t => ByteString -> EVM t ()
     frameRevert err = finishFrame (FrameReverted $ errorMsg err)
     errorMsg :: ByteString -> Expr Buf

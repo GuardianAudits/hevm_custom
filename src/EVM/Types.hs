@@ -688,6 +688,7 @@ data VM (t :: VMType) = VM
   , currentFork    :: Int
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
+  , cheatCallStats :: Map FunctionSelector CheatCallStats
   , freshVar       :: Int
   -- ^ used to generate fresh symbolic variable names for overapproximations
   --   during symbolic execution. See e.g. OpStaticcall
@@ -695,6 +696,13 @@ data VM (t :: VMType) = VM
   , keccakPreImgs  :: Set (ByteString, W256)
   }
   deriving (Generic)
+
+data CheatCallStats = CheatCallStats
+  { totalCalls    :: !Int
+  , successCalls  :: !Int
+  , failedCalls   :: !Int
+  }
+  deriving (Eq, Show, Generic)
 
 data ForkState = ForkState
   { env :: Env
@@ -1217,6 +1225,14 @@ instance Show FunctionSelector where show s = "0x" <> showHex s ""
 instance Read FunctionSelector where
   readsPrec _ ('0':'x':s) = first FunctionSelector <$> readHex s
   readsPrec _ s = first FunctionSelector <$> readHex s
+instance JSON.ToJSON FunctionSelector where
+  toJSON = JSON.String . T.pack . show
+instance JSON.FromJSON FunctionSelector where
+  parseJSON v = do
+    s <- T.unpack <$> JSON.parseJSON v
+    case reads s of
+      [(x, "")] -> pure x
+      _         -> fail $ "invalid function selector (" ++ s ++ ")"
 
 
 -- ByteString wrapper ------------------------------------------------------------------------------
