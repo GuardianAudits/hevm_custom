@@ -19,6 +19,7 @@ import Control.Arrow ((>>>))
 import Control.Monad (mzero)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (StateT)
+import Control.DeepSeq (NFData)
 import Crypto.Hash (hash, Keccak_256, Digest)
 import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
@@ -40,6 +41,7 @@ import Data.Word (Word8, Word32, Word64, byteSwap32, byteSwap64)
 import Data.DoubleWord
 import Data.DoubleWord.TH
 import Data.Foldable (Foldable(..))
+import Data.Hashable (Hashable)
 import Data.Map (Map)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -1220,11 +1222,13 @@ isQed _ = False
 
 -- | https://docs.soliditylang.org/en/v0.8.19/abi-spec.html#function-selector
 newtype FunctionSelector = FunctionSelector { unFunctionSelector :: Word32 }
-  deriving (Bits, Num, Eq, Ord, Real, Enum, Integral)
+  deriving (Bits, Num, Eq, Ord, Real, Enum, Integral, Generic)
 instance Show FunctionSelector where show s = "0x" <> showHex s ""
 instance Read FunctionSelector where
   readsPrec _ ('0':'x':s) = first FunctionSelector <$> readHex s
   readsPrec _ s = first FunctionSelector <$> readHex s
+instance Hashable FunctionSelector
+instance NFData FunctionSelector
 instance JSON.ToJSON FunctionSelector where
   toJSON = JSON.String . T.pack . show
 instance JSON.FromJSON FunctionSelector where

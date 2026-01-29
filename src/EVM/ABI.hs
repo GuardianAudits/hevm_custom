@@ -55,6 +55,7 @@ module EVM.ABI
   , parseTypeName
   , makeAbiValue
   , parseAbiValue
+  , bytesToAddr
   , selector
   , showAlter
   ) where
