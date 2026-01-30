@@ -163,6 +163,8 @@ makeVm o = do
     , labels = mempty
     , osEnv = mempty
     , cheatCallStats = mempty
+    , snapshots = mempty
+    , nextSnapshotId = 0
     , freshVar = 0
     , exploreDepth = 0
     , keccakPreImgs = fromList []
@@ -1922,6 +1924,34 @@ cheatActions = Map.fromList
             ]
         _ -> vmError (BadCheatCode "doFunctionCall(address,bytes,address) parameter decoding failed" sig)
 
+  , action "snapshot()" $
+      \sig _ -> whenSymbolicElse
+        (vmError (BadCheatCode "snapshot() not supported in symbolic mode" sig))
+        (do
+          vm <- get
+          let snapId = vm.nextSnapshotId
+          let snap = captureSnapshot vm
+          assign #snapshots (Map.insert snapId snap vm.snapshots)
+          assign #nextSnapshotId (snapId + 1)
+          let W256 snapIdWord = snapId
+          frameReturn $ AbiUInt 256 snapIdWord
+        )
+
+  , action "revertTo(uint256)" $
+      \sig input -> case decodeStaticArgs 0 1 input of
+        [snapIdExpr] ->
+          whenSymbolicElse
+            (vmError (BadCheatCode "revertTo(uint256) not supported in symbolic mode" sig))
+            (forceConcrete snapIdExpr "snapshot id must be concrete" $ \snapId -> do
+              snaps <- use #snapshots
+              case Map.lookup snapId snaps of
+                Nothing -> vmError (BadCheatCode "revertTo(uint256): unknown snapshot id" sig)
+                Just snap -> do
+                  restoreSnapshot snap
+                  frameReturn $ AbiBool True
+            )
+        _ -> vmError (BadCheatCode "revertTo(uint256) parameter decoding failed" sig)
+
   , action "createFork(string)" $
       \sig input -> case decodeBuf [AbiStringType] input of
         (CAbi valsArr,"") -> case valsArr of
@@ -2073,6 +2103,25 @@ cheatActions = Map.fromList
     frameReturnBuf buf = frameReturnExpr $ ConcreteBuf buf
     frameReturnExpr :: VMOps t => Expr Buf -> EVM t ()
     frameReturnExpr e = finishFrame (FrameReturned e)
+    captureSnapshot :: VM t -> Snapshot
+    captureSnapshot vm = Snapshot
+      { snapEnv = vm.env
+      , snapBlock = vm.block
+      , snapTxSubState = vm.tx.subState
+      , snapLogs = vm.logs
+      , snapTraces = vm.traces
+      , snapForks = vm.forks
+      , snapCurrentFork = vm.currentFork
+      }
+    restoreSnapshot :: Snapshot -> EVM t ()
+    restoreSnapshot snap = do
+      assign #env snap.snapEnv
+      assign #block snap.snapBlock
+      assign (#tx % #subState) snap.snapTxSubState
+      assign #logs snap.snapLogs
+      assign #traces snap.snapTraces
+      assign #forks snap.snapForks
+      assign #currentFork snap.snapCurrentFork
     runTrackedCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
     runTrackedCall target calldata actor = do
       let sel = selectorFromCalldata calldata

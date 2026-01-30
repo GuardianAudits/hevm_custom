@@ -691,6 +691,8 @@ data VM (t :: VMType) = VM
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
   , cheatCallStats :: Map FunctionSelector CheatCallStats
+  , snapshots      :: Map SnapshotId Snapshot
+  , nextSnapshotId :: SnapshotId
   , freshVar       :: Int
   -- ^ used to generate fresh symbolic variable names for overapproximations
   --   during symbolic execution. See e.g. OpStaticcall
@@ -698,6 +700,19 @@ data VM (t :: VMType) = VM
   , keccakPreImgs  :: Set (ByteString, W256)
   }
   deriving (Generic)
+
+type SnapshotId = W256
+
+data Snapshot = Snapshot
+  { snapEnv         :: Env
+  , snapBlock       :: Block
+  , snapTxSubState  :: SubState
+  , snapLogs        :: [Expr Log]
+  , snapTraces      :: Zipper.TreePos Zipper.Empty Trace
+  , snapForks       :: Seq ForkState
+  , snapCurrentFork :: Int
+  }
+  deriving (Show, Generic)
 
 data CheatCallStats = CheatCallStats
   { totalCalls    :: !Int
