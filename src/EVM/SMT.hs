@@ -31,7 +31,7 @@ module EVM.SMT
 import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
-import Control.Monad.Trans.Maybe (hoistMaybe)
+import Control.Monad.Trans.Maybe (MaybeT(..))
 import Data.Containers.ListUtils (nubOrd, nubInt)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -67,6 +67,9 @@ import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
 
+
+hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
+hoistMaybe = MaybeT . pure
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
 
