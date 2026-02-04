@@ -90,7 +90,8 @@
             ];
 
         # "static" binary for distribution
-        # on linux this is actually a real fully static binary
+        # on linux this is a real fully static binary except on aarch64,
+        # where we fall back to a dynamic build due to GHC musl limitations.
         # on macos this has everything except libcxx, libsystem and libiconv
         # statically linked. we can be confident that these three will always
         # be provided in a well known location by macos itself.
@@ -101,7 +102,10 @@
           codesign_allocate = "${pkgs.darwin.binutils.bintools}/bin/codesign_allocate";
           codesign = "${pkgs.darwin.sigtool}/bin/codesign";
         in if pkgs.stdenv.isLinux
-        then hlib.dontCheck (hevmBase pkgs.pkgsStatic)
+        then
+          if pkgs.stdenv.hostPlatform.isAarch64
+          then hlib.dontCheck (hevmBase pkgs)
+          else hlib.dontCheck (hevmBase pkgs.pkgsStatic)
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
           cp ${hlib.dontCheck (forceStaticDepsMacos (hevmBase pkgs))}/bin/hevm $out/bin/
