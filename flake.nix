@@ -59,6 +59,12 @@
                 else hprev.with-utf8;
               # TODO: temporary fix for static build which is still on 9.4
               witch = ps.haskell.lib.doJailbreak hprev.witch;
+              # Work around missing atomic symbols when building static aarch64-musl.
+              mkDerivation = args: hprev.mkDerivation (args // {
+                configureFlags = (args.configureFlags or [])
+                  ++ ps.lib.optionals ((ps.stdenv.hostPlatform.isAarch64 or false) && (ps.stdenv.hostPlatform.isMusl or false))
+                    [ "--ghc-option=-optl=-latomic" ];
+              });
             };
           };
         hlib = pkgs.haskell.lib;
