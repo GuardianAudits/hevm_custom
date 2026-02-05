@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: cachix/install-nix-action@v34
+        uses: cachix/install-nix-action@v31
       - name: build hevm
         run: |
           nix build .#redistributable --out-link hevm
@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/free-disk-space
       - name: Install Nix
-        uses: cachix/install-nix-action@v34
+        uses: cachix/install-nix-action@v31
       - name: download binaries
         uses: actions/download-artifact@v4
         with:
