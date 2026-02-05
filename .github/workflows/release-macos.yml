@@ -1,0 +1,55 @@
+name: "Release (macOS)"
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'release/[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  releaseBuilds:
+    strategy:
+      matrix:
+        include:
+          - runner: [self-hosted, macos, x64]
+            suffix: "x86_64-macos"
+          - runner: [self-hosted, macos, arm64]
+            suffix: "arm64-macos"
+
+    name: Build binary on ${{ matrix.suffix }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v34
+      - name: build hevm
+        run: |
+          nix build .#redistributable --out-link hevm
+          cp ./hevm/bin/hevm ./hevm-${{ matrix.suffix }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hevm-${{ matrix.suffix }}
+          path: ./hevm-${{ matrix.suffix }}
+  Upload:
+    needs: [releaseBuilds]
+    runs-on: [self-hosted, macos]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: download binaries
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: create github release & upload binaries
+        uses: softprops/action-gh-release@v2
+        # scheduled/manual runs should not create a release
+        if: github.event_name == 'push'
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            ./hevm-x86_64-macos
+            ./hevm-arm64-macos

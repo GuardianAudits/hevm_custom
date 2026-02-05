@@ -1,4 +1,4 @@
-name: "Release"
+name: "Release (Linux)"
 on:
   workflow_dispatch:
   push:
@@ -10,21 +10,13 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: "macos-15-intel"
-            suffix: "x86_64-macos"
-
-          # macos-15 is arm64
-          - os: "macos-15"
-            suffix: "arm64-macos"
-
-          - os: "ubuntu-latest"
+          - runner: [self-hosted, linux, x64]
             suffix: "x86_64-linux"
-
-          - os: "ubuntu-24.04-arm"
+          - runner: [self-hosted, linux, arm64]
             suffix: "arm64-linux"
 
-    name: Build binary on ${{ matrix.os }}
-    runs-on: ${{ matrix.os  }}
+    name: Build binary on ${{ matrix.suffix }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +33,7 @@ jobs:
           path: ./hevm-${{ matrix.suffix }}
   Upload:
     needs: [releaseBuilds]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
     steps:
@@ -63,8 +55,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             ./hevm-x86_64-linux
-            ./hevm-x86_64-macos
-            ./hevm-arm64-macos
             ./hevm-arm64-linux
       - name: prepare hackage artifacts
         run: |
