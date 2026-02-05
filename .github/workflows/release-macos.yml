@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: cachix/install-nix-action@v34
       - name: build hevm
         run: |
           nix build .#redistributable --out-link hevm
