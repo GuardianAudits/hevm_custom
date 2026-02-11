@@ -612,6 +612,8 @@ data Query t where
   PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic ()) -> Query Symbolic
   PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
   PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
+  PleaseReadFile      :: FilePath -> (Either String ByteString -> EVM t ()) -> Query t
+  PleaseGetCode       :: FilePath -> (Either String ByteString -> EVM t ()) -> Query t
 
 data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
@@ -643,6 +645,10 @@ instance Show (Query t) where
       (("<EVM.Query: do ffi: " ++ (show cmd) ++ " env: " ++ (show env)) ++)
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
+    PleaseReadFile path _ ->
+      (("<EVM.Query: read file: " ++ path ++ ">") ++)
+    PleaseGetCode path _ ->
+      (("<EVM.Query: get code: " ++ path ++ ">") ++)
 
 instance Show (BranchContext) where
   showsPrec _ = \case
@@ -690,7 +696,6 @@ data VM (t :: VMType) = VM
   , currentFork    :: Int
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
-  , cheatCallStats :: Map FunctionSelector CheatCallStats
   , snapshots      :: Map SnapshotId Snapshot
   , nextSnapshotId :: SnapshotId
   , freshVar       :: Int
@@ -713,13 +718,6 @@ data Snapshot = Snapshot
   , snapCurrentFork :: Int
   }
   deriving (Show, Generic)
-
-data CheatCallStats = CheatCallStats
-  { totalCalls    :: !Int
-  , successCalls  :: !Int
-  , failedCalls   :: !Int
-  }
-  deriving (Eq, Show, Generic)
 
 data ForkState = ForkState
   { env :: Env

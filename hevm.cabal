@@ -102,6 +102,7 @@ library
     EVM.Exec,
     EVM.Format,
     EVM.Fetch,
+    EVM.GetCode,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,

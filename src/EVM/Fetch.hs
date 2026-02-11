@@ -42,8 +42,8 @@ import EVM (emptyContract)
 
 import Optics.Core
 import GHC.Generics (Generic)
-import System.FilePath ((</>))
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.FilePath ((</>), isAbsolute, addTrailingPathSeparator)
+import System.Directory (createDirectoryIfMissing, doesFileExist, canonicalizePath, getCurrentDirectory, getFileSize)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
@@ -55,6 +55,7 @@ import Data.ByteString qualified as BS
 import Data.Text (Text, unpack, pack)
 import Data.Text qualified as T
 import Data.Foldable (Foldable(..))
+import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, fromJust, isNothing)
 import Data.Set qualified as Set
@@ -68,8 +69,10 @@ import System.Process
 import Control.Monad.IO.Class
 import Control.Monad (when)
 import EVM.Effects
+import EVM.GetCode qualified as GetCode
 import qualified EVM.Expr as Expr
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
+import Text.Read (readMaybe)
 
 type Fetcher t m = App m => Query t -> m (EVM t ())
 
@@ -581,9 +584,72 @@ oracle solvers preSess rpcInfo q = do
       value <- liftIO $ lookupEnv variable
       pure . continue $ fromMaybe "" value
 
+    PleaseReadFile path continue -> do
+      root <- liftIO getFsRoot
+      maxBytes <- liftIO getFsMaxBytes
+      res <- liftIO $ safeReadFileUnderRoot root maxBytes path
+      pure $ continue res
+
+    PleaseGetCode artifactRef continue -> do
+      res <- liftIO $ GetCode.getCodeFromEnv GetCode.PreferHevm artifactRef
+      pure $ continue res
+
     where
       -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
       isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D
+
+      defaultMaxReadFileBytes :: Integer
+      defaultMaxReadFileBytes = 5 * 1024 * 1024
+
+      getFsRoot :: IO FilePath
+      getFsRoot =
+        lookupEnv "HEVM_FS_ROOT" >>= \case
+          Just r -> pure r
+          Nothing ->
+            lookupEnv "ECHIDNA_FS_ROOT" >>= \case
+              Just r -> pure r
+              Nothing -> getCurrentDirectory
+
+      getFsMaxBytes :: IO Integer
+      getFsMaxBytes =
+        lookupEnv "HEVM_FS_MAX_BYTES" >>= \case
+          Just raw | Just n <- readMaybe raw, n > 0 -> pure n
+          _ ->
+            lookupEnv "ECHIDNA_FS_MAX_BYTES" >>= \case
+              Just raw | Just n <- readMaybe raw, n > 0 -> pure n
+              _ -> pure defaultMaxReadFileBytes
+
+      safeReadFileUnderRoot :: FilePath -> Integer -> FilePath -> IO (Either String BS.ByteString)
+      safeReadFileUnderRoot root maxBytes path = do
+        eRootAbs <- (try (canonicalizePath root) :: IO (Either SomeException FilePath))
+        case eRootAbs of
+          Left e -> pure $ Left ("readFile: invalid root: " <> show e)
+          Right rootAbs -> do
+            let candidate = if isAbsolute path then path else rootAbs </> path
+            eFileAbs <- (try (canonicalizePath candidate) :: IO (Either SomeException FilePath))
+            case eFileAbs of
+              Left e -> pure $ Left ("readFile: cannot canonicalize path: " <> show e)
+              Right fileAbs -> do
+                let rootPrefix = addTrailingPathSeparator rootAbs
+                let inRoot = fileAbs == rootAbs || rootPrefix `isPrefixOf` fileAbs
+                if not inRoot then
+                  pure $ Left "readFile: path escapes HEVM_FS_ROOT"
+                else do
+                  exists <- doesFileExist fileAbs
+                  if not exists then
+                    pure $ Left "readFile: file does not exist"
+                  else do
+                    eSize <- (try (getFileSize fileAbs) :: IO (Either SomeException Integer))
+                    case eSize of
+                      Left e -> pure $ Left ("readFile: cannot stat file: " <> show e)
+                      Right sz ->
+                        if sz > maxBytes then
+                          pure $ Left ("readFile: file too large (" <> show sz <> " bytes)")
+                        else do
+                          eBs <- (try (BS.readFile fileAbs) :: IO (Either SomeException BS.ByteString))
+                          pure $ case eBs of
+                            Left e -> Left ("readFile: read failed: " <> show e)
+                            Right bs -> Right bs
 
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])

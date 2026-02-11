@@ -28,6 +28,9 @@ import EVM.Effects (Config (..))
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
+import Data.Aeson (Value(..), eitherDecodeStrict')
+import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as AesonKM
 import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
@@ -46,11 +49,13 @@ import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, mapMaybe)
+import Data.Scientific (toBoundedInteger)
 import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
-import Data.Text (unpack, pack)
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text (Text, unpack, pack)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Char (isDigit)
 import Data.Tree
 import Data.Tree.Zipper qualified as Zipper
 import Data.Typeable
@@ -162,7 +167,6 @@ makeVm o = do
     , currentFork = 0
     , labels = mempty
     , osEnv = mempty
-    , cheatCallStats = mempty
     , snapshots = mempty
     , nextSnapshotId = 0
     , freshVar = 0
@@ -1817,6 +1821,47 @@ cheatActions = Map.fromList
             _ -> vmError (BadCheatCode "ffi(string[]) parameter decoding failed" sig)
         else vmError $ BadCheatCode "ffi disabled: run again with --ffi if you want to allow tests to call external scripts" sig
 
+  , action "readFile(string)" $
+      \sig input -> do
+        vm <- get
+        if vm.config.allowFFI then
+          case decodeBuf [AbiStringType] input of
+            (CAbi [AbiString pathBytes],"") -> do
+              let pathStr = toString pathBytes
+              let cont = \case
+                    Left err -> continueOnce $ frameRevert (Char8.pack err)
+                    Right contents ->
+                      continueOnce $ frameReturn $ AbiTuple $ V.fromList [AbiString contents]
+              query (PleaseReadFile pathStr cont)
+            _ -> vmError (BadCheatCode "readFile(string) parameter decoding failed" sig)
+        else vmError $ BadCheatCode "readFile disabled: run again with --ffi if you want to allow tests to read files" sig
+
+  , action "getCode(string)" $
+      \sig input -> do
+        vm <- get
+        if vm.config.allowFFI then
+          case decodeBuf [AbiStringType] input of
+            (CAbi [AbiString artifactRefBytes], "") -> do
+              let artifactRef = toString artifactRefBytes
+              let cont = \case
+                    Left err ->
+                      continueOnce $ frameRevert (Char8.pack err)
+                    Right codeBytes ->
+                      continueOnce $ frameReturn $ AbiTuple $ V.fromList [AbiBytesDynamic codeBytes]
+              query (PleaseGetCode artifactRef cont)
+            _ -> vmError (BadCheatCode "getCode(string) parameter decoding failed" sig)
+        else vmError $ BadCheatCode "getCode disabled: run again with --ffi if you want to allow tests to read artifacts" sig
+
+  , action "parseJsonBytes(string,string)" $
+      \sig input -> case decodeBuf [AbiStringType, AbiStringType] input of
+        (CAbi [AbiString jsonBytes, AbiString keyBytes],"") ->
+          continueOnce $ do
+            case parseJsonBytesCheat jsonBytes (toString keyBytes) of
+              Left err -> frameRevert err
+              Right out ->
+                frameReturn $ AbiTuple $ V.fromList [AbiBytesDynamic out]
+        _ -> vmError (BadCheatCode "parseJsonBytes(string,string) parameter decoding failed" sig)
+
   , action "warp(uint256)" $
       \sig input -> case decodeStaticArgs 0 1 input of
         [x]  -> do
@@ -1913,16 +1958,6 @@ cheatActions = Map.fromList
         doStop
         assign (#state % #overrideCaller) Nothing
         assign (#state % #resetCaller) False
-
-  , action "doFunctionCall(address,bytes,address)" $
-      \sig input -> case decodeBuf [AbiAddressType, AbiBytesDynamicType, AbiAddressType] input of
-        (CAbi [AbiAddress target, AbiBytesDynamic calldata, AbiAddress actor],"") -> do
-          (success, returndata) <- runTrackedCall (LitAddr target) calldata (LitAddr actor)
-          frameReturn $ AbiTuple $ V.fromList
-            [ AbiBool success
-            , AbiBytesDynamic returndata
-            ]
-        _ -> vmError (BadCheatCode "doFunctionCall(address,bytes,address) parameter decoding failed" sig)
 
   , action "snapshot()" $
       \sig _ -> whenSymbolicElse
@@ -2122,77 +2157,6 @@ cheatActions = Map.fromList
       assign #traces snap.snapTraces
       assign #forks snap.snapForks
       assign #currentFork snap.snapCurrentFork
-    runTrackedCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
-    runTrackedCall target calldata actor = do
-      let sel = selectorFromCalldata calldata
-      (success, returndata) <- runLowLevelCall target calldata actor
-      updateCheatCallStats sel success
-      pure (success, returndata)
-    selectorFromCalldata :: ByteString -> FunctionSelector
-    selectorFromCalldata bs
-      | BS.length bs < 4 = FunctionSelector 0
-      | otherwise = FunctionSelector $ word32 $ BS.unpack $ BS.take 4 bs
-    updateCheatCallStats :: FunctionSelector -> Bool -> EVM t ()
-    updateCheatCallStats sel success =
-      #cheatCallStats %= Map.alter (Just . bump) sel
-      where
-        bump Nothing = CheatCallStats 1 (if success then 1 else 0) (if success then 0 else 1)
-        bump (Just s) = s
-          { totalCalls = s.totalCalls + 1
-          , successCalls = s.successCalls + if success then 1 else 0
-          , failedCalls = s.failedCalls + if success then 0 else 1
-          }
-    runLowLevelCall :: (?conf :: Config, VMOps t, Typeable t) => Expr EAddr -> ByteString -> Expr EAddr -> EVM t (Bool, ByteString)
-    runLowLevelCall target calldata actor = do
-      let ?op = 0xF1 -- CALL
-      assign (#state % #overrideCaller) (Just actor)
-      assign (#state % #resetCaller) True
-      overrideC <- use (#state % #overrideCaller)
-      selfAddr <- use (#state % #contract)
-      vm <- get
-      let this = fromMaybe (internalError "state contract") (Map.lookup selfAddr vm.env.contracts)
-      gasGiven <- use (#state % #gas)
-      callValue <- use (#state % #callvalue)
-      let inOffset = Lit 0
-      let inSize = Lit (fromIntegral (BS.length calldata))
-      let outOffset = Lit 0
-      let outSize = Lit 0
-      copyBytesToMemory (ConcreteBuf calldata) inSize (Lit 0) (Lit 0)
-      let startDepth = length vm.frames
-      let doCall =
-            delegateCall this gasGiven target target callValue inOffset inSize outOffset outSize [] unknownCode $ \callee -> do
-              let from' = fromMaybe selfAddr overrideC
-              zoom #state $ do
-                assign #callvalue callValue
-                assign #caller from'
-                assign #contract callee
-              touchAccount from'
-              touchAccount callee
-              transfer from' callee callValue
-      case maybeLitWordSimp callValue of
-        Just 0 -> doCall
-        _ -> notStatic doCall
-      runUntilDepth startDepth
-      stk <- use (#state % #stack)
-      let success = case stk of
-            (x:_) -> case maybeLitWordSimp x of
-              Just 0 -> False
-              Just _ -> True
-              Nothing -> False
-            _ -> False
-      retExpr <- use (#state % #returndata)
-      retBytes <- case retExpr of
-        ConcreteBuf b -> pure b
-        _ -> do
-          unexpectedSymArg "doFunctionCall returndata must be concrete" [retExpr]
-          pure mempty
-      pure (success, retBytes)
-    runUntilDepth :: (?conf :: Config, VMOps t, Typeable t) => Int -> EVM t ()
-    runUntilDepth targetDepth = do
-      vm <- get
-      if isJust vm.result || length vm.frames <= targetDepth
-        then pure ()
-        else exec1 ?conf >> runUntilDepth targetDepth
     frameRevert :: VMOps t => ByteString -> EVM t ()
     frameRevert err = finishFrame (FrameReverted $ errorMsg err)
     errorMsg :: ByteString -> Expr Buf
@@ -2203,6 +2167,97 @@ cheatActions = Map.fromList
     doStop = finishFrame (FrameReturned mempty)
     toString = unpack . decodeUtf8
     strip0x s = if "0x" `isPrefixOf` s then drop 2 s else s
+    parseJsonBytesCheat :: ByteString -> String -> Either ByteString ByteString
+    parseJsonBytesCheat jsonBytes keyPath = do
+      val <- case eitherDecodeStrict' jsonBytes of
+        Left e -> Left (Char8.pack ("parseJsonBytes: invalid JSON: " <> e))
+        Right v -> Right v
+      steps <- parseJsonPath keyPath
+      selected <- applyJsonPath val steps
+      jsonValueToBytes selected
+      where
+        -- Path step: Left = object key, Right = array index
+        parseJsonPath :: String -> Either ByteString [Either AesonKey.Key Int]
+        parseJsonPath "" = Right []
+        parseJsonPath s0 = go [] s0
+          where
+            go acc "" = Right (reverse acc)
+            go acc ('.':rest) = parseKey acc rest
+            go acc ('[':rest) = parseBracket acc rest
+            go acc rest = parseKey acc rest -- allow leading "foo" without a leading '.'
+
+            parseKey acc s =
+              let (rawKey, rest) = span (\c -> c /= '.' && c /= '[') s
+              in if null rawKey
+                 then Left "parseJsonBytes: empty key segment"
+                 else go (Left (AesonKey.fromText (pack rawKey)) : acc) rest
+
+            parseBracket acc s =
+              case s of
+                ('\'':xs) -> parseQuoted '\'' acc xs
+                ('"':xs)  -> parseQuoted '"' acc xs
+                _ ->
+                  let (digits, rest) = span isDigit s
+                   in if null digits
+                     then Left "parseJsonBytes: expected quoted key or numeric index after '['"
+                     else case rest of
+                       (']':rest') ->
+                         case (readMaybe digits :: Maybe Int) of
+                           Just i | i >= 0 -> go (Right i : acc) rest'
+                           _ -> Left "parseJsonBytes: invalid array index"
+                       _ -> Left "parseJsonBytes: missing closing ']' for array index"
+
+            parseQuoted q acc xs =
+              let (rawKey, rest0) = break (== q) xs
+              in case rest0 of
+                   (q':']':rest') | q' == q ->
+                     go (Left (AesonKey.fromText (pack rawKey)) : acc) rest'
+                   _ -> Left "parseJsonBytes: missing closing quote/bracket for key"
+
+        applyJsonPath :: Value -> [Either AesonKey.Key Int] -> Either ByteString Value
+        applyJsonPath v [] = Right v
+        applyJsonPath v (step:rest) =
+          case step of
+            Left k -> case v of
+              Object o -> case AesonKM.lookup k o of
+                Just v' -> applyJsonPath v' rest
+                Nothing -> Left $ Char8.pack ("parseJsonBytes: missing key: " <> show (AesonKey.toText k))
+              _ -> Left "parseJsonBytes: expected object while traversing key"
+            Right i -> case v of
+              Array a ->
+                if i < 0 || i >= V.length a then
+                  Left "parseJsonBytes: array index out of bounds"
+                else
+                  applyJsonPath (a V.! i) rest
+              _ -> Left "parseJsonBytes: expected array while traversing index"
+
+        jsonValueToBytes :: Value -> Either ByteString ByteString
+        jsonValueToBytes = \case
+          String t -> decodeHexText t
+          Array a -> BS.pack <$> traverse jsonElemToByte (V.toList a)
+          _ -> Left "parseJsonBytes: selected value must be a hex string or array of byte values"
+
+        jsonElemToByte :: Value -> Either ByteString Word8
+        jsonElemToByte = \case
+          Number n -> case (toBoundedInteger n :: Maybe Int) of
+            Just i | i >= 0 && i <= 255 -> Right (fromIntegral i)
+            _ -> Left "parseJsonBytes: array element out of byte range"
+          _ -> Left "parseJsonBytes: array elements must be numbers"
+
+        decodeHexText :: Text -> Either ByteString ByteString
+        decodeHexText t =
+          let bs = encodeUtf8 t
+              p0x = BS8.pack "0x"
+              p0X = BS8.pack "0X"
+          in if BS.isPrefixOf p0x bs || BS.isPrefixOf p0X bs then
+               let hex0 = BS.drop 2 bs
+                   -- Be permissive: allow odd-length hex by left-padding a nibble.
+                   hex = if BS.length hex0 `mod` 2 == 1 then BS8.singleton '0' <> hex0 else hex0
+               in case BS16.decodeBase16Untyped hex of
+                 Right out -> Right out
+                 Left _ -> Left "parseJsonBytes: invalid hex string"
+             else
+               Left "parseJsonBytes: expected hex string with 0x prefix"
     stringToBool :: String -> Either ByteString Bool
     stringToBool s = case s of
       "true" -> Right True
