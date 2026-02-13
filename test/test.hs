@@ -2998,6 +2998,220 @@ tests = testGroup "hevm"
       assertBoolM "The expression MUST NOT be partial" $ Prelude.not (any isPartial paths)
       assertEqualM "number of errors" 0 numErrs
       assertEqualM "number of counterexamples" 1 numCexes
+    , test "vm.deal ERC20 no-adjust" $ do
+      Just creation <- solidity "C"
+        [i|
+        interface Vm {
+          function deal(address token, address to, uint256 give) external;
+          function deal(address token, address to, uint256 give, bool adjustTotalSupply) external;
+        }
+        contract Token {
+          mapping(address => uint256) public balanceOf;
+          uint256 public totalSupply;
+
+          function mint(address to, uint256 amt) external {
+            balanceOf[to] += amt;
+            totalSupply += amt;
+          }
+        }
+        contract C {
+          function testDealErc20NoAdjust() external {
+            Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+            Token t = new Token();
+            address user = address(0xBEEF);
+            t.mint(user, 100);
+
+            vm.deal(address(t), user, 50);
+
+            assert(t.balanceOf(user) == 50);
+            // deal(..., adjustTotalSupply=false) must not adjust supply (forge-std parity)
+            assert(t.totalSupply() == 100);
+          }
+        }
+        |]
+      Just vm <- loadVM creation
+      let vm' = set (#state % #calldata) (ConcreteBuf (selector "testDealErc20NoAdjust()")) vm
+      res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+      case res of
+        Right (ConcreteBuf _) -> pure ()
+        Left e -> assertFailure (show e)
+        Right e -> assertFailure ("unexpected output: " <> show e)
+    , test "vm.deal ERC20 adjustTotalSupply increase" $ do
+      Just creation <- solidity "C"
+        [i|
+        interface Vm {
+          function deal(address token, address to, uint256 give) external;
+          function deal(address token, address to, uint256 give, bool adjustTotalSupply) external;
+        }
+        contract Token {
+          mapping(address => uint256) public balanceOf;
+          uint256 public totalSupply;
+
+          function mint(address to, uint256 amt) external {
+            balanceOf[to] += amt;
+            totalSupply += amt;
+          }
+        }
+        contract C {
+          function testDealErc20AdjustIncrease() external {
+            Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+            Token t = new Token();
+            address user = address(0xBEEF);
+            t.mint(user, 10);
+
+            vm.deal(address(t), user, 25, true);
+
+            assert(t.balanceOf(user) == 25);
+            // totalSupply should be adjusted by (give - prevBal)
+            assert(t.totalSupply() == 25);
+          }
+        }
+        |]
+      Just vm <- loadVM creation
+      let vm' = set (#state % #calldata) (ConcreteBuf (selector "testDealErc20AdjustIncrease()")) vm
+      res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+      case res of
+        Right (ConcreteBuf _) -> pure ()
+        Left e -> assertFailure (show e)
+        Right e -> assertFailure ("unexpected output: " <> show e)
+    , test "vm.deal ERC20 adjustTotalSupply decrease" $ do
+      Just creation <- solidity "C"
+        [i|
+        interface Vm {
+          function deal(address token, address to, uint256 give) external;
+          function deal(address token, address to, uint256 give, bool adjustTotalSupply) external;
+        }
+        contract Token {
+          mapping(address => uint256) public balanceOf;
+          uint256 public totalSupply;
+
+          function mint(address to, uint256 amt) external {
+            balanceOf[to] += amt;
+            totalSupply += amt;
+          }
+        }
+        contract C {
+          function testDealErc20AdjustDecrease() external {
+            Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+            Token t = new Token();
+            address user = address(0xBEEF);
+            t.mint(user, 30);
+
+            vm.deal(address(t), user, 5, true);
+
+            assert(t.balanceOf(user) == 5);
+            // totalSupply should be adjusted by (give - prevBal)
+            assert(t.totalSupply() == 5);
+          }
+        }
+        |]
+      Just vm <- loadVM creation
+      let vm' = set (#state % #calldata) (ConcreteBuf (selector "testDealErc20AdjustDecrease()")) vm
+      res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+      case res of
+        Right (ConcreteBuf _) -> pure ()
+        Left e -> assertFailure (show e)
+        Right e -> assertFailure ("unexpected output: " <> show e)
+    , test "vm.record/accesses read-only + reset" $ do
+      Just creation <- solidity "C"
+        [i|
+        interface Vm {
+          function record() external;
+          function accesses(address target) external returns (bytes32[] memory reads, bytes32[] memory writes);
+        }
+        contract Token {
+          mapping(address => uint256) public balanceOf;
+
+          function mint(address to, uint256 amt) external {
+            balanceOf[to] += amt;
+          }
+        }
+        contract C {
+          function testRecordAccessesReadOnly() external {
+            Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+            Token t = new Token();
+            address user = address(0xBEEF);
+            t.mint(user, 1);
+
+            // gotcha: accesses() before record() should be empty
+            (bytes32[] memory r0, bytes32[] memory w0) = vm.accesses(address(t));
+            assert(r0.length == 0);
+            assert(w0.length == 0);
+
+            vm.record();
+            t.balanceOf(user);
+
+            (bytes32[] memory reads, bytes32[] memory writes) = vm.accesses(address(t));
+            assert(writes.length == 0);
+
+            bytes32 expected = keccak256(abi.encode(user, uint256(0)));
+            bool found = false;
+            for (uint256 i = 0; i < reads.length; i++) {
+              if (reads[i] == expected) { found = true; break; }
+            }
+            assert(found);
+
+            // calling record() again clears previous data
+            vm.record();
+            (bytes32[] memory r2, bytes32[] memory w2) = vm.accesses(address(t));
+            assert(r2.length == 0);
+            assert(w2.length == 0);
+          }
+        }
+        |]
+      Just vm <- loadVM creation
+      let vm' = set (#state % #calldata) (ConcreteBuf (selector "testRecordAccessesReadOnly()")) vm
+      res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+      case res of
+        Right (ConcreteBuf _) -> pure ()
+        Left e -> assertFailure (show e)
+        Right e -> assertFailure ("unexpected output: " <> show e)
+    , test "vm.record/accesses write counts as read" $ do
+      Just creation <- solidity "C"
+        [i|
+        interface Vm {
+          function record() external;
+          function accesses(address target) external returns (bytes32[] memory reads, bytes32[] memory writes);
+        }
+        contract Token {
+          mapping(address => uint256) public balanceOf;
+
+          function setBal(address to, uint256 amt) external {
+            balanceOf[to] = amt; // SSTORE without a preceding SLOAD
+          }
+        }
+        contract C {
+          function testRecordAccessesWriteAlsoRead() external {
+            Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+            Token t = new Token();
+            address user = address(0xBEEF);
+
+            vm.record();
+            t.setBal(user, 123);
+
+            (bytes32[] memory reads, bytes32[] memory writes) = vm.accesses(address(t));
+            bytes32 expected = keccak256(abi.encode(user, uint256(0)));
+
+            bool foundR = false;
+            bool foundW = false;
+            for (uint256 i = 0; i < reads.length; i++) {
+              if (reads[i] == expected) { foundR = true; break; }
+            }
+            for (uint256 i = 0; i < writes.length; i++) {
+              if (writes[i] == expected) { foundW = true; break; }
+            }
+            assert(foundR);
+            assert(foundW);
+          }
+        }
+        |]
+      Just vm <- loadVM creation
+      let vm' = set (#state % #calldata) (ConcreteBuf (selector "testRecordAccessesWriteAlsoRead()")) vm
+      res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+      case res of
+        Right (ConcreteBuf _) -> pure ()
+        Left e -> assertFailure (show e)
+        Right e -> assertFailure ("unexpected output: " <> show e)
     , test "call-extcodehash-symb1" $ do
       Just c <- solcRuntime "C"
         [i|

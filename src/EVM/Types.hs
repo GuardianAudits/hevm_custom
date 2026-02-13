@@ -784,6 +784,10 @@ data SubState = SubState
   , accessedStorageKeys :: Set (Expr EAddr, W256)
   , refunds             :: [(Expr EAddr, Word64)]
   , createdContracts    :: Set (Expr EAddr)
+  -- Foundry-compatible storage access recording (vm.record / vm.accesses).
+  , recordingStorageAccesses :: Bool
+  , recordedStorageReads     :: [(Expr EAddr, W256)]
+  , recordedStorageWrites    :: [(Expr EAddr, W256)]
   -- in principle we should include logs here, but do not for now
   }
   deriving (Eq, Ord, Show)

@@ -117,6 +117,7 @@ main = do
                    , ("hashes", hashes, Nothing)
                    , ("hashmem", hashmem, Nothing)
                    , ("balanceTransfer", balanceTransfer, Nothing)
+                   , ("dealErc20", dealErc20, Just 10)
                    , ("funcCall", funcCall, Nothing)
                    , ("contractCreation", contractCreation, Nothing)
                    , ("contractCreationMem", contractCreationMem, Nothing)
@@ -137,6 +138,32 @@ simpleLoop n = do
               uint256 acc = 0;
               for (uint i = 0; i < ${n}; i++) {
                 acc += i;
+              }
+            }
+          }
+        |]
+  fmap fromJust (runApp $ solcRuntime "A" src)
+
+-- Repeatedly call `vm.deal(token,to,give)` on an ERC20-shaped storage layout.
+-- This benchmarks the `deal(address,address,uint256)` cheatcode including slot
+-- discovery and checked-write verification.
+dealErc20 :: Int -> IO ByteString
+dealErc20 n = do
+  let src =
+        [i|
+          interface Vm {
+            function deal(address token, address to, uint256 give) external;
+          }
+
+          contract A {
+            mapping (address => uint256) public balanceOf;
+            uint256 public totalSupply;
+
+            function main() public {
+              Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+              address user = address(0xBEEF);
+              for (uint i = 0; i < ${n}; i++) {
+                vm.deal(address(this), user, i);
               }
             }
           }
