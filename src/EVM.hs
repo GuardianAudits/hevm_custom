@@ -2278,27 +2278,27 @@ cheatActions = Map.fromList
                     let adjustTotalSupply = adjWord /= 0
                     let cdBal = erc20BalanceOfSel <> word256Bytes (fromIntegral toAddr :: W256)
 
-                    -- 1) Read prevBal via STATICCALL + abi.decode(uint256)
-                    callTarget token cdBal $ \(_succPrev, retPrev, _retWordPrev, _readsPrev) ->
-                      case decodeUint256 retPrev of
-                        Nothing -> frameRevert "StdCheats deal: balanceOf decode failed"
-                        Just prevBal -> do
-                          -- 2) checked_write balanceOf(to) = give
-                          checkedWrite token cdBal give $ do
-                            if not adjustTotalSupply then doStop
-                            else do
-                              let cdTot = erc20TotalSupplySel
-                              -- 3) Read totalSupply via STATICCALL + abi.decode(uint256)
-                              callTarget token cdTot $ \(_succSup, retSup, _retWordSup, _readsSup) ->
-                                case decodeUint256 retSup of
-                                  Nothing -> frameRevert "StdCheats deal: totalSupply decode failed"
-                                  Just totSup -> do
-                                    -- 4) Adjust with Solidity checked arithmetic semantics (revert on under/overflow)
-                                    case adjustSupplyChecked totSup prevBal give of
-                                      Left () -> finishFrame (FrameReverted (ConcreteBuf panicArithmetic))
-                                      Right totSup' ->
-                                        -- 5) checked_write totalSupply() = totSup'
-                                        checkedWrite token cdTot totSup' doStop
+                    -- 1) Read prevBal via STATICCALL (first return word)
+                    callTarget token cdBal $ \(succPrev, _retPrev, retWordPrev, _readsPrev) ->
+                      if not succPrev then frameRevert "StdCheats deal: balanceOf call failed"
+                      else do
+                        let prevBal = retWordPrev
+                        -- 2) checked_write balanceOf(to) = give
+                        checkedWrite token cdBal give $ do
+                          if not adjustTotalSupply then doStop
+                          else do
+                            let cdTot = erc20TotalSupplySel
+                            -- 3) Read totalSupply via STATICCALL (first return word)
+                            callTarget token cdTot $ \(succSup, _retSup, retWordSup, _readsSup) ->
+                              if not succSup then frameRevert "StdCheats deal: totalSupply call failed"
+                              else do
+                                let totSup = retWordSup
+                                -- 4) Adjust with Solidity checked arithmetic semantics (revert on under/overflow)
+                                case adjustSupplyChecked totSup prevBal give of
+                                  Left () -> finishFrame (FrameReverted (ConcreteBuf panicArithmetic))
+                                  Right totSup' ->
+                                    -- 5) checked_write totalSupply() = totSup'
+                                    checkedWrite token cdTot totSup' doStop
         )
 
     -- ERC20 selectors used by forge-std:
@@ -2313,11 +2313,6 @@ cheatActions = Map.fromList
     -- Solidity's arithmetic overflow/underflow reverts with Panic(0x11).
     panicArithmetic :: ByteString
     panicArithmetic = selector "Panic(uint256)" <> word256Bytes (0x11 :: W256)
-
-    decodeUint256 :: ByteString -> Maybe W256
-    decodeUint256 bs
-      | BS.length bs < 32 = Nothing
-      | otherwise = Just (word (BS.take 32 bs))
 
     -- totSup +/- (give - prevBal), with checked arithmetic (solc 0.8 semantics)
     adjustSupplyChecked :: W256 -> W256 -> W256 -> Either () W256
@@ -2334,7 +2329,8 @@ cheatActions = Map.fromList
     -- verifies the write by re-calling and checking the first return word.
     checkedWrite :: (?conf :: Config, VMOps t, Typeable t) => Addr -> ByteString -> W256 -> EVM t () -> EVM t ()
     checkedWrite token cd setVal cont = do
-      callTarget token cd $ \(_succ, _ret, callResult, readSlots0) -> do
+      callTarget token cd $ \(succ0, _ret, callResult, readSlots0) -> do
+        unless succ0 $ frameRevert "StdStorage.checked_write: initial call failed."
         if null readSlots0 then frameRevert "No storage use detected for target."
         else
           findSlot token cd callResult (reverse readSlots0) $ \slot -> do
@@ -2404,6 +2400,20 @@ cheatActions = Map.fromList
     callTarget token cd cont =
       fetchAccount (LitAddr token) $ \targetContr -> do
         vm <- get
+        -- NOTE: `callTarget` is used from inside cheatcode execution.
+        --
+        -- In our cheatcode CALL model, the current `vm.state.gas` during the
+        -- cheatcode can be near-zero because the CALL "gas given" has already
+        -- been burned, and the caller's pre-call state is stored in the top
+        -- frame. For nested STATICCALLs (used by ERC20 `deal` slot discovery),
+        -- we want a large gas budget, so we take it from the caller frame when
+        -- available.
+        --
+        -- This matches the intuition of forge-std's StdStorage workflow: the
+        -- `staticcall` is performed with effectively all available gas.
+        let nestedGas = case vm.frames of
+              Frame { state = st } : _ -> st.gas
+              _ -> vm.state.gas
         let
           allContracts = vm.env.contracts
           others = Map.toList $ Map.delete (LitAddr token) allContracts
@@ -2417,7 +2427,7 @@ cheatActions = Map.fromList
             , address = LitAddr token
             , caller = vm.state.contract
             , origin = vm.tx.origin
-            , gas = vm.state.gas
+            , gas = nestedGas
             , gaslimit = vm.tx.gaslimit
             , number = vm.block.number
             , timestamp = vm.block.timestamp
@@ -2448,7 +2458,11 @@ cheatActions = Map.fromList
             outBytes = case outExpr of
               ConcreteBuf bs -> bs
               _ -> mempty
-            outWord = if BS.length outBytes >= 32 then word (BS.take 32 outBytes) else 0
+            -- Returndata is often represented as an expression (WriteWord/CopySlice)
+            -- rather than a ConcreteBuf even in concrete mode. Extract the first
+            -- return word via `readWord` so callers (e.g. ERC20 deal) don't depend
+            -- on a ConcreteBuf representation.
+            outWord = fromMaybe 0 (maybeLitWordSimp (readWord (Lit 0) outExpr))
             readSlots = [ s
                         | (addrExpr, s) <- toList nestedF.tx.subState.accessedStorageKeys
                         , addrExpr == LitAddr token

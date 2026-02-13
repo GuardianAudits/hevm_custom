@@ -12,6 +12,7 @@ import Data.Proxy
 import Control.Monad
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT)
 import Data.Bits hiding (And, Xor)
@@ -3034,8 +3035,8 @@ tests = testGroup "hevm"
       res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
       case res of
         Right (ConcreteBuf _) -> pure ()
-        Left e -> assertFailure (show e)
-        Right e -> assertFailure ("unexpected output: " <> show e)
+        Left e -> liftIO $ assertFailure (show e)
+        Right e -> liftIO $ assertFailure ("unexpected output: " <> show e)
     , test "vm.deal ERC20 adjustTotalSupply increase" $ do
       Just creation <- solidity "C"
         [i|
@@ -3072,8 +3073,8 @@ tests = testGroup "hevm"
       res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
       case res of
         Right (ConcreteBuf _) -> pure ()
-        Left e -> assertFailure (show e)
-        Right e -> assertFailure ("unexpected output: " <> show e)
+        Left e -> liftIO $ assertFailure (show e)
+        Right e -> liftIO $ assertFailure ("unexpected output: " <> show e)
     , test "vm.deal ERC20 adjustTotalSupply decrease" $ do
       Just creation <- solidity "C"
         [i|
@@ -3110,8 +3111,8 @@ tests = testGroup "hevm"
       res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
       case res of
         Right (ConcreteBuf _) -> pure ()
-        Left e -> assertFailure (show e)
-        Right e -> assertFailure ("unexpected output: " <> show e)
+        Left e -> liftIO $ assertFailure (show e)
+        Right e -> liftIO $ assertFailure ("unexpected output: " <> show e)
     , test "vm.record/accesses read-only + reset" $ do
       Just creation <- solidity "C"
         [i|
@@ -3164,8 +3165,8 @@ tests = testGroup "hevm"
       res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
       case res of
         Right (ConcreteBuf _) -> pure ()
-        Left e -> assertFailure (show e)
-        Right e -> assertFailure ("unexpected output: " <> show e)
+        Left e -> liftIO $ assertFailure (show e)
+        Right e -> liftIO $ assertFailure ("unexpected output: " <> show e)
     , test "vm.record/accesses write counts as read" $ do
       Just creation <- solidity "C"
         [i|
@@ -3210,8 +3211,8 @@ tests = testGroup "hevm"
       res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
       case res of
         Right (ConcreteBuf _) -> pure ()
-        Left e -> assertFailure (show e)
-        Right e -> assertFailure ("unexpected output: " <> show e)
+        Left e -> liftIO $ assertFailure (show e)
+        Right e -> liftIO $ assertFailure ("unexpected output: " <> show e)
     , test "call-extcodehash-symb1" $ do
       Just c <- solcRuntime "C"
         [i|
