@@ -885,8 +885,8 @@ tests = testGroup "hevm"
           _ -> internalError "Should reject 3-byte value for bytes4"
     , test "ABI-dynamic-array-length-overflow" $ do
         -- The decoder should fail safely when the dynamic array length exceeds maxBound::Int.
-        let tooBig = (fromIntegral (maxBound :: Int) + 1) :: Integer
-        let payload = runPut $ putAbi (AbiUInt 256 (unsafeInto tooBig))
+        let tooBig = (fromIntegral (maxBound :: Int) + 1) :: Word256
+        let payload = runPut $ putAbi (AbiUInt 256 tooBig)
         case runGetOrFail (getAbi (AbiArrayDynamicType (AbiUIntType 256))) payload of
           Left _ -> pure ()
           Right _ -> internalError "Expected decode failure for oversized dynamic array length"
