@@ -117,7 +117,7 @@ instance Show SlotType where
    (show t) s
 
 instance Read SlotType where
-  readsPrec _ t@('m':'a':'p':'p':'i':'n':'g':'(':s) =
+  readsPrec _ ('m':'a':'p':'p':'i':'n':'g':'(':s) =
     case T.splitOn " => " (pack s) of
       lhs : rhs@(_ : _) ->
         let
