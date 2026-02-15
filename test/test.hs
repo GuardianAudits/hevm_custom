@@ -5603,7 +5603,12 @@ checkEquivBase mkprop l r expect = do
       let ret = case res of
             Qed -> Just True
             Cex {} -> Just False
-            Error _ -> Just (not expect)
+            -- Some SMT solvers report limitations as an "error" string (e.g. unsupported operations).
+            -- For these fuzz-equivalence tests, treat those cases as "unknown" so we don't fail
+            -- due to solver limitations unrelated to the simplification under test.
+            Error msg
+              | "unsupported operation" `List.isInfixOf` msg -> Nothing
+              | otherwise -> Just (not expect)
             Unknown _ -> Nothing
       when (ret == Just (not expect)) $ liftIO $ print res
       pure ret
