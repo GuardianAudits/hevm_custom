@@ -118,14 +118,21 @@ instance Show SlotType where
 
 instance Read SlotType where
   readsPrec _ t@('m':'a':'p':'p':'i':'n':'g':'(':s) =
-    let (lhs,rhs) = case T.splitOn " => " (pack s) of
-          (l:r) -> (l,r)
-          _ -> internalError $ "could not parse storage item: " <> t
-        first = fromJust $ parseTypeName mempty lhs
-        target = fromJust $ parseTypeName mempty (T.replace ")" "" (last rhs))
-        rest = fmap (fromJust . (parseTypeName mempty . (T.replace "mapping(" ""))) (take (length rhs - 1) rhs)
-    in [(StorageMapping (first NonEmpty.:| rest) target, "")]
-  readsPrec _ s = [(StorageValue $ fromMaybe (internalError $ "could not parse storage item: " <> s) (parseTypeName mempty (pack s)),"")]
+    case T.splitOn " => " (pack s) of
+      lhs : rhs@(_ : _) ->
+        let
+          mFirst = parseTypeName mempty lhs
+          mTarget = parseTypeName mempty (T.replace ")" "" (last rhs))
+          mRest = traverse (parseTypeName mempty . T.replace "mapping(" "")) (take (length rhs - 1) rhs)
+        in case (mFirst, mRest, mTarget) of
+             (Just first, Just rest, Just target) ->
+               [(StorageMapping (first NonEmpty.:| rest) target, "")]
+             _ -> []
+      _ -> []
+  readsPrec _ s =
+    case parseTypeName mempty (pack s) of
+      Just t -> [(StorageValue t, "")]
+      Nothing -> []
 
 data SolcContract = SolcContract
   { runtimeCodehash  :: W256
@@ -679,13 +686,18 @@ mkStorageLayout Nothing = Nothing
 mkStorageLayout (Just json) = do
   items <- json ^? key "storage" % _Array
   types <- json ^? key "types"
-  fmap Map.fromList (forM (Vector.toList items) $ \item ->
-    do name <- item ^? key "label" % _String
-       offset <- item ^? key "offset" % _Number >>= toBoundedInteger
-       slot <- item ^? key "slot" % _String
-       typ <- Key.fromText <$> item ^? key "type" % _String
-       slotType <- types ^?! key typ ^? key "label" % _String
-       pure (name, StorageItem (read $ T.unpack slotType) offset (read $ T.unpack slot)))
+  let
+    parseOne :: Value -> Maybe (Text, StorageItem)
+    parseOne item = do
+      name <- item ^? key "label" % _String
+      offset <- item ^? key "offset" % _Number >>= toBoundedInteger
+      slotTxt <- item ^? key "slot" % _String
+      slot <- readMaybe (T.unpack slotTxt)
+      typ <- Key.fromText <$> item ^? key "type" % _String
+      slotTypeTxt <- types ^?! key typ ^? key "label" % _String
+      slotType <- readMaybe (T.unpack slotTypeTxt)
+      pure (name, StorageItem slotType offset slot)
+  pure $ Map.fromList (mapMaybe parseOne (Vector.toList items))
 
 signature :: AsValue s => s -> Text
 signature abi =
@@ -703,10 +715,37 @@ signature abi =
 -- Helper function to convert the fields to the desired type
 parseTypeName' :: AsValue s => s -> Maybe AbiType
 parseTypeName' x =
-  parseTypeName
-    (fromMaybe mempty $ x ^? key "components" % _Array % to parseComponents)
-    (x ^?! key "type" % _String)
-  where parseComponents = fmap $ snd . parseMethodInput
+  let
+    components = fromMaybe mempty $ x ^? key "components" % _Array % to parseComponents
+    ty = x ^?! key "type" % _String
+  in
+    parseTypeName components ty
+      <|> (x ^? key "internalType" % _String >>= parseInternalType components)
+  where
+    parseComponents = fmap $ snd . parseMethodInput
+
+    -- Some producers put non-canonical types into `type` (or we may fall back
+    -- to `internalType`). Normalize a few common cases without crashing.
+    parseInternalType :: Vector AbiType -> Text -> Maybe AbiType
+    parseInternalType comps internal =
+      let t = T.strip internal
+      in case () of
+           _ | Just rest <- T.stripPrefix "enum " t ->
+                 -- Preserve array suffixes by rewriting to the canonical base.
+                 parseTypeName comps ("uint8" <> takeArraySuffix rest)
+             | Just rest <- T.stripPrefix "contract " t ->
+                 parseTypeName comps ("address" <> takeArraySuffix rest)
+             | Just rest <- T.stripPrefix "struct " t ->
+                 if Vector.null comps
+                   then Nothing
+                   else parseTypeName comps ("tuple" <> takeArraySuffix rest)
+             | otherwise ->
+                 -- If the internal type is already a canonical ABI type (or an
+                 -- `enum ...` that `parseTypeName` can handle), try parsing it.
+                 parseTypeName comps t
+      where
+        takeArraySuffix :: Text -> Text
+        takeArraySuffix s = T.dropWhile (/= '[') (T.strip s)
 
 parseMutability :: Text -> Mutability
 parseMutability "view" = View

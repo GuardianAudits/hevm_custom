@@ -396,7 +396,7 @@ abiMethod s args = BSLazy.toStrict . runPut $ do
   putAbi args
 
 parseTypeName :: Vector AbiType -> Text -> Maybe AbiType
-parseTypeName = P.parseMaybe . typeWithArraySuffix
+parseTypeName v = P.parseMaybe (typeWithArraySuffix v <* P.eof)
 
 typeWithArraySuffix :: Vector AbiType -> P.Parsec () Text AbiType
 typeWithArraySuffix v = do
@@ -429,9 +429,14 @@ basicType v =
     , P.string "tuple" $> AbiTupleType v
     , P.string "function" $> AbiFunctionType
 
-    -- Fallback for user-defined types like enums (e.g., Order.OrderType)
-    -- Treat them as uint8 since Solidity enums are stored as uint8
-    , P.try (P.some (P.noneOf ("[]" :: String)) $> AbiUIntType 8)
+    -- Fallback for user-defined enums. Some JSON producers incorrectly put
+    -- enum names (e.g. `Order.OrderType` or `enum Order.OrderType`) in the
+    -- `type` field instead of the canonical `uint8`.
+    --
+    -- We intentionally keep this conservative to avoid silently mis-parsing
+    -- arbitrary unknown types.
+    , enumPrefixedType
+    , namespacedType
     ]
 
   where
@@ -440,6 +445,26 @@ basicType v =
       void (P.string s)
       n <- read <$> P.some P.digitChar
       if valid n then pure (f n) else P.empty
+
+    parseUserDefinedName :: P.Parsec () Text String
+    parseUserDefinedName = do
+      first <- P.letterChar <|> P.char '_'
+      rest <- P.many (P.alphaNumChar <|> P.char '_' <|> P.char '.')
+      pure (first : rest)
+
+    enumPrefixedType :: P.Parsec () Text AbiType
+    enumPrefixedType = P.try $ do
+      void (P.string "enum")
+      void P.space1
+      _ <- parseUserDefinedName
+      pure (AbiUIntType 8)
+
+    namespacedType :: P.Parsec () Text AbiType
+    namespacedType = P.try $ do
+      name <- parseUserDefinedName
+      if '.' `elem` name
+        then pure (AbiUIntType 8)
+        else P.empty
 
 pack32 :: Int -> [Word32] -> Word256
 pack32 n xs =

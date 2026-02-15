@@ -883,6 +883,24 @@ tests = testGroup "hevm"
         case readP_to_S (parseAbiValue (AbiBytesType 4)) threeBytes of
           [] -> pure ()  -- Expected: parsing should fail
           _ -> internalError "Should reject 3-byte value for bytes4"
+    , test "ABI-dynamic-array-length-overflow" $ do
+        -- The decoder should fail safely when the dynamic array length exceeds maxBound::Int.
+        let tooBig = (fromIntegral (maxBound :: Int) + 1) :: Integer
+        let payload = runPut $ putAbi (AbiUInt 256 (unsafeInto tooBig))
+        case runGetOrFail (getAbi (AbiArrayDynamicType (AbiUIntType 256))) payload of
+          Left _ -> pure ()
+          Right _ -> internalError "Expected decode failure for oversized dynamic array length"
+    , test "ABI-user-defined-enum-type-fallback" $ do
+        -- Some producers emit enum names in the ABI `type` (or we may parse `internalType`).
+        assertEqualM "namespaced enum parses as uint8"
+          (Just (AbiUIntType 8))
+          (parseTypeName mempty (T.pack "Order.OrderType"))
+        assertEqualM "enum keyword prefix parses as uint8"
+          (Just (AbiUIntType 8))
+          (parseTypeName mempty (T.pack "enum Order.OrderType"))
+        assertEqualM "enum array suffix parses"
+          (Just (AbiArrayDynamicType (AbiUIntType 8)))
+          (parseTypeName mempty (T.pack "Order.OrderType[]"))
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $
