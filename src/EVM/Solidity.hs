@@ -123,10 +123,8 @@ instance Read SlotType where
         let
           mFirst = parseTypeName mempty lhs
           mTarget = parseTypeName mempty (T.replace ")" "" (last rhs))
-          mRest =
-            traverse
-              (parseTypeName mempty . T.replace "mapping(" "")
-              ) (take (length rhs - 1) rhs)
+          stripMapping = T.replace "mapping(" ""
+          mRest = traverse (parseTypeName mempty . stripMapping) (take (length rhs - 1) rhs)
         in case (mFirst, mRest, mTarget) of
              (Just first, Just rest, Just target) ->
                [(StorageMapping (first NonEmpty.:| rest) target, "")]
