@@ -12,7 +12,6 @@ import Data.Proxy
 import Control.Monad
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
-import Control.Monad.IO.Class (liftIO)
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT)
 import Data.Bits hiding (And, Xor)
