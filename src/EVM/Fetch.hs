@@ -61,6 +61,7 @@ import Data.Maybe (fromMaybe, fromJust, isNothing)
 import Data.Set qualified as Set
 import Data.Set (Set)
 import Data.Vector qualified as RegularVector
+import Network.HTTP.Client qualified as HTTP
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
 import Numeric.Natural (Natural)
@@ -483,7 +484,10 @@ saveCache dir n cache = do
 
 mkSession :: App m => Maybe FilePath -> Maybe W256 -> m Session
 mkSession cacheDir mblock = do
-  sess <- liftIO NetSession.newAPISession
+  -- Use 60s response timeout (default is 30s) to outlast Anvil's 45s upstream timeout
+  let settings = HTTP.defaultManagerSettings
+        { HTTP.managerResponseTimeout = HTTP.responseTimeoutMicro 60_000_000 }
+  sess <- liftIO $ NetSession.newSessionControl Nothing settings
   initialCache <- case (cacheDir, mblock) of
       (Just dir, Just block) -> liftIO $ loadCache dir block
       _ -> pure emptyCache
