@@ -6126,6 +6126,7 @@ genWord litFreq sz = frequency
     , liftM2 SHL subWord subWord
     , liftM2 SHR subWord subWord
     , liftM2 SAR subWord subWord
+    , fmap CLZ subWord
     , fmap BlockHash subWord
     --, liftM3 Balance arbitrary arbitrary subWord
     --, fmap CodeSize subWord
@@ -6210,6 +6211,7 @@ genWordArith litFreq sz = frequency
     , (3 , liftM2 SHL  subWord subWord)
     , (3 , liftM2 SHR  subWord subWord)
     , (3 , liftM2 SAR  subWord subWord)
+    , (3 , fmap CLZ    subWord)
     , (3 , liftM2 Or   subWord subWord)
     -- comparisons, reducing variability greatly
     , (1 , liftM2 LEq  subWord subWord)
