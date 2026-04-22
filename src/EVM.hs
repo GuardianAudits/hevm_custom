@@ -433,6 +433,9 @@ exec1 conf = do
         OpShr -> {-# SCC "OpShr" #-} stackOp2 g_verylow Expr.shr
         OpSar -> {-# SCC "OpSar" #-} stackOp2 g_verylow Expr.sar
 
+        -- EIP-7939: Count leading zeros (Osaka)
+        OpClz -> {-# SCC "OpClz" #-} stackOp1 g_low Expr.clz
+
         -- more accurately referred to as KECCAK
         OpSha3 -> {-# SCC "OpSha3" #-}
           case stk of

@@ -200,6 +200,28 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       assertEqual "stuff" p4 (Lit 0x1)
       let p5 = Expr.sex (Lit 0) (Lit 0x0)
       assertEqual "stuff" p5 (Lit 0x0)
+  -- EIP-7939: CLZ (Count Leading Zeros) tests
+  , testCase "clz-zero" $ assertEqual "CLZ of 0 should be 256"
+      (Lit 256)
+      (Expr.clz (Lit 0))
+  , testCase "clz-one" $ assertEqual "CLZ of 1 should be 255"
+      (Lit 255)
+      (Expr.clz (Lit 1))
+  , testCase "clz-two" $ assertEqual "CLZ of 2 should be 254"
+      (Lit 254)
+      (Expr.clz (Lit 2))
+  , testCase "clz-max" $ assertEqual "CLZ of max uint256 should be 0"
+      (Lit 0)
+      (Expr.clz (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))
+  , testCase "clz-high-bit" $ assertEqual "CLZ of 2^255 should be 0"
+      (Lit 0)
+      (Expr.clz (Lit 0x8000000000000000000000000000000000000000000000000000000000000000))
+  , testCase "clz-0x100" $ assertEqual "CLZ of 0x100 should be 247"
+      (Lit 247)
+      (Expr.clz (Lit 0x100))
+  , testCase "clz-symbolic" $ assertEqual "CLZ of symbolic stays symbolic"
+      (CLZ (Var "x"))
+      (Expr.clz (Var "x"))
   ]
 
 propSimplificationTests :: TestTree
