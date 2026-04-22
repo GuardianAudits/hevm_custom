@@ -1,6 +1,6 @@
 module EVM.Transaction where
 
-import EVM (initialContract, ceilDiv)
+import EVM (initialContract, ceilDiv, collision)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule
 import EVM.Format (hexText)
@@ -107,6 +107,7 @@ sender tx = ecrec v' tx.r  tx.s hash
   where hash = keccak' (signingData tx)
         v    = tx.v
         v'   = if v == 27 || v == 28 then v
+               else if v >= 35 then 28 - (v `mod` 2)
                else 27 + v
 
 sign :: Integer -> Transaction -> Transaction
@@ -198,6 +199,18 @@ txGasCost fs tx =
       initcodeCost = fs.g_initcodeword * unsafeInto (ceilDiv (BS.length calldata) 32)
   in baseCost + zeroCost * (unsafeInto zeroBytes) + nonZeroCost * (unsafeInto nonZeroBytes)
 
+-- | EIP-7623: Calculate floor gas cost based on calldata tokens.
+-- tokens = zero_bytes + nonzero_bytes * 4
+txdataFloorGas :: FeeSchedule Word64 -> Transaction -> Word64
+txdataFloorGas fs tx =
+  let calldata     = tx.txdata
+      zeroBytes    = BS.count 0 calldata
+      nonZeroBytes = BS.length calldata - zeroBytes
+      baseCost     = fs.g_transaction
+      floorCost    = fs.g_txdatafloor
+      tokens       = unsafeInto zeroBytes + unsafeInto nonZeroBytes * 4
+  in baseCost + floorCost * tokens
+
 instance FromJSON AccessListEntry where
   parseJSON (JSON.Object val) = do
     accessAddress_ <- addrField val "address"
@@ -267,13 +280,18 @@ initTx vm =
     preState = setupTx origin coinbase gasPrice gasLimit vm.env.contracts
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
-    initState =
-        ((Map.adjust (over #balance (`Expr.sub` value))) origin)
-      . (Map.adjust (over #balance (Expr.add value))) toAddr
-      . (if creation
-         then Map.insert toAddr (toContract & (set #balance oldBalance))
-         else touchAccount toAddr)
-      $ preState
+    hasCollision = creation && collision (Map.lookup toAddr preState)
+    initState = if hasCollision
+      then touchAccount toAddr preState
+      else ((Map.adjust (over #balance (`Expr.sub` value))) origin)
+         . (Map.adjust (over #balance (Expr.add value))) toAddr
+         . (if creation
+            then Map.insert toAddr (toContract & (set #balance oldBalance))
+            else touchAccount toAddr)
+         $ preState
   in
     vm & #env % #contracts .~ initState
        & #tx % #txReversion .~ preState
+       & (if hasCollision
+          then #state % #code .~ RuntimeCode (ConcreteRuntimeCode "")
+          else id)

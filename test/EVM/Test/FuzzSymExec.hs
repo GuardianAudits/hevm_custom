@@ -428,6 +428,8 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
+    , txdataFloorGas = EVM.Transaction.txdataFloorGas evmToolEnv.schedule txn
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
        <&> set (#state % #calldata) calldata'

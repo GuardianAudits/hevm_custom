@@ -89,6 +89,9 @@
               hlib.compose.doCheck
             ];
 
+        hevmRelease = ps :
+          hlib.disableLibraryProfiling (hlib.dontCheck (hevmBase ps));
+
         # "static" binary for distribution
         # on linux this is a real fully static binary except on aarch64,
         # where we fall back to a dynamic build due to GHC musl limitations.
@@ -104,11 +107,11 @@
         in if pkgs.stdenv.isLinux
         then
           if pkgs.stdenv.hostPlatform.isAarch64
-          then hlib.dontCheck (hevmBase pkgs)
-          else hlib.dontCheck (hevmBase pkgs.pkgsStatic)
+          then hevmRelease pkgs
+          else hevmRelease pkgs.pkgsStatic
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
-          cp ${hlib.dontCheck (forceStaticDepsMacos (hevmBase pkgs))}/bin/hevm $out/bin/
+          cp ${forceStaticDepsMacos (hevmRelease pkgs)}/bin/hevm $out/bin/
 
           # get the list of dynamic libs from otool and tidy the output
           libs=$(${otool} -L $out/bin/hevm | tail -n +2 | sed 's/^[[:space:]]*//' | cut -d' ' -f1)

@@ -20,7 +20,7 @@ import EVM.Types
 import EVM.UnitTest
 import Test.Tasty.Bench
 import Control.Monad.ST
-import EVM.FeeSchedule (feeSchedule)
+import EVM.FeeSchedule (defaultTxdataFloorGas, feeSchedule)
 
 -- benchmark hevm using tasty-bench
 
@@ -65,7 +65,9 @@ vm0Opts c =
       allowFFI = False,
       otherContracts = [],
       freshAddresses = 0,
-      beaconRoot = 0
+      beaconRoot = 0,
+      parentHash = 0,
+      txdataFloorGas = defaultTxdataFloorGas
     }
 
 vmOptsToTestVMParams :: VMOpts Concrete -> TestVMParams

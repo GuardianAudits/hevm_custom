@@ -165,6 +165,8 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     , allowFFI       = False
     , freshAddresses = 0
     , beaconRoot     = 0
+    , parentHash     = 0
+    , txdataFloorGas = blk.schedule.g_transaction
     })
 
 testRpc :: Text

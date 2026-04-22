@@ -63,7 +63,7 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word8, Word64)
 import Text.Read (readMaybe)
 import Witch (into, tryFrom, unsafeInto, tryInto)
 
@@ -121,7 +121,7 @@ makeVm o = do
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
-  pure $ setEIP4788Storage o $ VM
+  pure $ setEIP2935Storage o $ setEIP4788Storage o $ VM
     { result = Nothing
     , frames = mempty
     , tx = TxState
@@ -134,6 +134,7 @@ makeVm o = do
       , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty False mempty mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , txdataFloorGas = o.txdataFloorGas
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -219,6 +220,24 @@ setEIP4788Storage o vm = do
                                  vm.env.contracts
         }
       }
+    Nothing -> vm
+
+-- https://eips.ethereum.org/EIPS/eip-2935
+setEIP2935Storage :: VMOpts t -> VM t -> VM t
+setEIP2935Storage o vm =
+  let historyStorageAddress = LitAddr 0x0000F90827F1C53a10cb7A02335B175320002935
+  in case Map.lookup historyStorageAddress vm.env.contracts of
+    Just historyContract ->
+      let historyBufferLength = 8191
+          slotIdx = Expr.mod (Expr.sub o.number (Lit 1)) (Lit historyBufferLength)
+          storage = Expr.writeStorage slotIdx (Lit o.parentHash) historyContract.storage
+      in vm
+        { env = vm.env
+          { contracts = Map.insert historyStorageAddress
+              (historyContract { storage } :: Contract)
+              vm.env.contracts
+          }
+        }
     Nothing -> vm
 
 -- | Initialize an abstract contract with unknown code
@@ -308,7 +327,7 @@ exec1 conf = do
     doStop = finishFrame (FrameReturned mempty)
     litSelf = maybeLitAddrSimp self
 
-  if isJust litSelf && (fromJust litSelf) > 0x0 && (fromJust litSelf) <= 0xa then do
+  if isJust litSelf && isPrecompileAddr' (fromJust litSelf) then do
     -- call to precompile
     let ?op = 0x00 -- dummy value
     let calldatasize = bufLength vm.state.calldata
@@ -433,6 +452,9 @@ exec1 conf = do
         OpShr -> {-# SCC "OpShr" #-} stackOp2 g_verylow Expr.shr
         OpSar -> {-# SCC "OpSar" #-} stackOp2 g_verylow Expr.sar
 
+        -- EIP-7939: Count leading zeros (Osaka)
+        OpClz -> {-# SCC "OpClz" #-} stackOp1 g_low Expr.clz
+
         -- more accurately referred to as KECCAK
         OpSha3 -> {-# SCC "OpSha3" #-}
           case stk of
@@ -480,7 +502,9 @@ exec1 conf = do
             next >> pushSym vm.state.callvalue
 
         OpCalldataload -> {-# SCC "OpCalldataload" #-} stackOp1 g_verylow $
-          \ind -> Expr.readWord ind vm.state.calldata
+          \ind -> case (ind, vm.state.calldata) of
+            (Lit i, ConcreteBuf bs) | i > fromIntegral (BS.length bs) -> Lit 0
+            _ -> Expr.readWord ind vm.state.calldata
 
         OpCalldatasize -> {-# SCC "OpCalldatasize" #-}
           limitStack 1 . burn g_base $
@@ -665,7 +689,7 @@ exec1 conf = do
 
         OpMcopy -> {-# SCC "OpMcopy" #-}
           case stk of
-            dstOff:srcOff:sz:xs ->  do
+            dstOff:srcOff:sz:xs ->
               case sz of
                 Lit sz' -> do
                   let words_copied = (sz' + 31) `div` 32
@@ -673,14 +697,16 @@ exec1 conf = do
                   burn (g_verylow + (unsafeInto g_mcopy)) $
                     accessMemoryRange srcOff sz $ accessMemoryRange dstOff sz $ do
                       next
+                      assign' (#state % #stack) xs
                       mcopy sz srcOff dstOff
                 _ -> do
                   -- symbolic, ignore gas
                   next
+                  assign' (#state % #stack) xs
                   mcopy sz srcOff dstOff
-              assign' (#state % #stack) xs
             _ -> underrun
             where
+            mcopy (Lit 0) _ _ = pure ()
             mcopy sz srcOff dstOff = do
                   m <- gets (.state.memory)
                   case m of
@@ -1270,20 +1296,25 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
           let
             (lenb, lene, lenm) = parseModexpLength input'
 
-            output = ConcreteBuf $
-              if isZero (96 + lenb + lene) lenm input'
-              then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
-              else
-                let
-                  b = asInteger $ lazySlice 96 lenb input'
-                  e = asInteger $ lazySlice (96 + lenb) lene input'
-                  m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
-                in
-                  padLeft (unsafeInto lenm) (asBE (expFast b e m))
-          assign' (#state % #stack) (Lit 1 : xs)
-          assign (#state % #returndata) output
-          copyBytesToMemory output outSize (Lit 0) outOffset
-          next
+            modexpLimit = 1024 :: W256
+          if lenb > modexpLimit || lene > modexpLimit || lenm > modexpLimit
+          then precompileFail
+          else do
+            let
+              output = ConcreteBuf $
+                if isZero (96 + lenb + lene) lenm input'
+                then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
+                else
+                  let
+                    b = asInteger $ lazySlice 96 lenb input'
+                    e = asInteger $ lazySlice (96 + lenb) lene input'
+                    m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
+                  in
+                    padLeft (unsafeInto lenm) (asBE (expFast b e m))
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
 
       -- ECADD
       0x6 ->
@@ -1354,8 +1385,8 @@ lazySlice offset size bs =
 parseModexpLength :: ByteString -> (W256, W256, W256)
 parseModexpLength input =
   let lenb = word $ LS.toStrict $ lazySlice  0 32 input
-      lene = word $ LS.toStrict $ lazySlice 32 64 input
-      lenm = word $ LS.toStrict $ lazySlice 64 96 input
+      lene = word $ LS.toStrict $ lazySlice 32 32 input
+      lenm = word $ LS.toStrict $ lazySlice 64 32 input
   in (lenb, lene, lenm)
 
 --- checks if a range of ByteString bs starting at offset and length size is all zeros.
@@ -1540,8 +1571,16 @@ finalize = do
       -- deposit the code from a creation tx
       creation <- use (#tx % #isCreate)
       createe  <- use (#state % #contract)
-      createeExists <- (Map.member createe) <$> use (#env % #contracts)
-      when (creation && createeExists) $
+      createeContract <- preuse (#env % #contracts % ix createe)
+      let isCollision = creation && case createeContract of
+            Just c -> case c.code of
+              InitCode _ _ -> False
+              RuntimeCode _ -> True
+              UnknownCode _ -> internalError "cannot determine collision with unknown code"
+            Nothing -> internalError "create transaction but no code found"
+      when isCollision $ assign (#state % #gas) initialGas
+      let shouldReplaceCode = creation && not isCollision
+      when shouldReplaceCode $
         case output of
           ConcreteBuf bs -> replaceCode createe (RuntimeCode (ConcreteRuntimeCode bs))
           _ ->
@@ -2204,6 +2243,8 @@ cheatActions = Map.fromList
   , action "assertGt(int256,int256)"   $ assertSGt (AbiIntType 256)
   , action "assertGe(uint256,uint256)" $ assertGe (AbiUIntType 256)
   , action "assertGe(int256,int256)"   $ assertSGe (AbiIntType 256)
+  , action "assertApproxEqAbs(uint256,uint256,uint256)" $ assertApproxEqAbsUint
+  , action "assertApproxEqAbs(int256,int256,uint256)"   $ assertApproxEqAbsInt
   --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
@@ -2444,6 +2485,8 @@ cheatActions = Map.fromList
             , allowFFI = False
             , freshAddresses = vm.env.freshAddresses
             , beaconRoot = 0
+            , parentHash = 0
+            , txdataFloorGas = vm.tx.txdataFloorGas
             }
         nested0 <- lift $ makeVm opts
         nested1 <- lift $ execStateT (assign (#state % #static) True) nested0
@@ -2669,6 +2712,53 @@ cheatActions = Map.fromList
     assertSLe =   genAssert (<=) (\a b -> Expr.iszero $ Expr.sgt a b) ">" "assertLe"
     assertGe =    genAssert (>=) Expr.geq "<" "assertGe"
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
+    assertApproxEqAbsUint sig input = do
+      case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxDelta], "") ->
+          let delta = if a > b then a - b else b - a
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3], "") ->
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
+    assertApproxEqAbsInt sig input = do
+      case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxDelta], "") ->
+          let
+            absI x =
+              if x == minBound
+              then fromIntegral (maxBound :: Int256) + 1
+              else fromIntegral (abs x) :: Word256
+            absA = absI a
+            absB = absI b
+            sameSign = (a >= 0 && b >= 0) || (a < 0 && b < 0)
+            delta =
+              if sameSign
+              then if absA > absB then absA - absB else absB - absA
+              else absA + absB
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3], "") ->
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
@@ -2756,14 +2846,21 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
 
 -- -- * Contract creation
 
--- EIP 684
+-- EIP-684 and EIP-7610: collision if nonce != 0, code is non-empty, or storage is non-empty.
 collision :: Maybe Contract -> Bool
 collision c' = case c' of
-  Just c -> c.nonce /= Just 0 || case c.code of
+  Just c -> c.nonce /= Just 0 || not (isStorageEmpty c.storage) || case c.code of
     RuntimeCode (ConcreteRuntimeCode "") -> False
     RuntimeCode (SymbolicRuntimeCode b) -> not $ null b
     _ -> True
   Nothing -> False
+  where
+    isStorageEmpty :: Expr Storage -> Bool
+    isStorageEmpty = \case
+      ConcreteStore m -> Map.null m
+      AbstractStore _ _ -> True
+      SStore _ _ _ -> False
+      GVar _ -> internalError "unexpected global variable"
 
 create :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   => Expr EAddr -> Contract
@@ -2898,6 +2995,7 @@ replaceCode target newCode =
               { balance = now.balance
               , nonce = now.nonce
               , storage = now.storage
+              , tStorage = now.tStorage
               }
         RuntimeCode _ ->
           internalError $ "Can't replace code of deployed contract " <> show target
@@ -3444,27 +3542,41 @@ mkCodeOps contractCode =
 
 concreteModexpGasFee :: ByteString -> Word64
 concreteModexpGasFee input =
-  if lenb < into (maxBound :: Word32) &&
-     (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
-     lenm < into (maxBound :: Word64)
-  then
-    max 200 ((multiplicationComplexity * iterCount) `div` 3)
-  else
-    maxBound -- TODO: this is not 100% correct, return Nothing on overflow
-  where
-    (lenb, lene, lenm) = parseModexpLength input
-    ez = isZero (96 + lenb) lene input
-    e' = word $ LS.toStrict $
-      lazySlice (96 + lenb) (min 32 lene) input
-    nwords :: Word64
-    nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    multiplicationComplexity = nwords * nwords
-    iterCount' :: Word64
-    iterCount' | lene <= 32 && ez = 0
-               | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 8 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 8 * (unsafeInto lene - 32)
-    iterCount = max iterCount' 1
+  let (lenb, lene, lenm) = parseModexpLength input
+      eip7823Limit :: W256
+      eip7823Limit = 1024
+  in if lenb > eip7823Limit || lene > eip7823Limit || lenm > eip7823Limit
+     then 0
+     else
+       let ez = isZero (96 + lenb) lene input
+           e' = word $ LS.toStrict $ lazySlice (96 + lenb) (min 32 lene) input
+           maxLength :: Word64
+           maxLength = unsafeInto $ max lenb lenm
+           nwords :: Word64
+           nwords = ceilDiv maxLength 8
+           multiplicationComplexity :: Word64
+           multiplicationComplexity
+             | maxLength <= 32 = 16
+             | nwords > 0xFFFFFFFF = maxBound
+             | otherwise =
+                 let nw2 = nwords * nwords
+                 in if nw2 > maxBound `div` 2
+                    then maxBound
+                    else 2 * nw2
+           lene64 :: Word64
+           lene64 = unsafeInto lene
+           iterCount' :: Word64
+           iterCount' | lene <= 32 && ez = 0
+                      | lene <= 32 = unsafeInto (log2 e')
+                      | e' == 0 = 16 * (lene64 - 32)
+                      | otherwise = unsafeInto (log2 e') + 16 * (lene64 - 32)
+           iterCount = max iterCount' 1
+           result = if multiplicationComplexity == maxBound
+                    then maxBound
+                    else if iterCount > maxBound `div` multiplicationComplexity
+                         then maxBound
+                         else multiplicationComplexity * iterCount
+       in max 500 result
 
 -- Gas cost of precompiles
 costOfPrecompile :: FeeSchedule Word64 -> Addr -> Expr Buf -> Word64
@@ -3563,9 +3675,13 @@ freshSymAddr = do
   n <- use (#env % #freshAddresses)
   pure $ SymAddr ("freshSymAddr" <> (pack $ show n))
 
+isPrecompileAddr' :: Addr -> Bool
+isPrecompileAddr' 0x100 = True
+isPrecompileAddr' x = 0x0 < x && x <= 0x11
+
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
-  LitAddr a -> 0x0 < a && a <= 0x09
+  LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
 
@@ -3746,9 +3862,9 @@ instance VMOps Concrete where
     else continue
 
   gasTryFrom (forceLit -> w256) =
-    case tryFrom w256 of
-      Left _ -> Left ()
-      Right a -> Right a
+    if w256 > into (maxBound :: Word64)
+    then Right maxBound
+    else Right (unsafeInto w256)
 
   -- Gas cost of create, including hash cost if needed
   costOfCreate (FeeSchedule {..}) availableGas size hashNeeded = (createCost, initGas)
@@ -3790,11 +3906,16 @@ instance VMOps Concrete where
     gasRemaining <- use (#state % #gas)
 
     let
-      sumRefunds   = sum (snd <$> tx.subState.refunds)
-      gasUsed      = tx.gaslimit - gasRemaining
-      cappedRefund = min (quot gasUsed 5) sumRefunds
-      originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
-      minerPay     = tx.priorityFee * (into gasUsed)
+      gasUsedBeforeRefund = tx.gaslimit - gasRemaining
+      sumRefunds          = sum (snd <$> tx.subState.refunds)
+      cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
+      gasUsedAfterRefund  = gasUsedBeforeRefund - cappedRefund
+      gasUsed             = max gasUsedAfterRefund tx.txdataFloorGas
+      actualRefund        = if gasUsed > gasUsedAfterRefund
+                            then cappedRefund - (gasUsed - gasUsedAfterRefund)
+                            else cappedRefund
+      originPay           = (into $ gasRemaining + actualRefund) * tx.gasprice
+      minerPay            = tx.priorityFee * (into gasUsed)
 
     modifying (#env % #contracts)
        (Map.adjust (over #balance (Expr.add (Lit originPay))) tx.origin)

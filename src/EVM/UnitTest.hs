@@ -11,7 +11,7 @@ import EVM.Dapp
 import EVM.Effects
 import EVM.Exec
 import EVM.Expr qualified as Expr
-import EVM.FeeSchedule (feeSchedule)
+import EVM.FeeSchedule (defaultTxdataFloorGas, feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format
 import EVM.Solidity
@@ -553,6 +553,8 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
            , allowFFI = ffiAllowed
            , freshAddresses = 0
            , beaconRoot = 0
+           , parentHash = 0
+           , txdataFloorGas = defaultTxdataFloorGas
            }
   let creator =
         initialContract (RuntimeCode (ConcreteRuntimeCode ""))

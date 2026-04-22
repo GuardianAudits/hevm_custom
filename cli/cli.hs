@@ -44,7 +44,7 @@ import EVM.ABI (Sig(..))
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
-import EVM.FeeSchedule (feeSchedule)
+import EVM.FeeSchedule (defaultTxdataFloorGas, feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexByteString, strip0x, formatExpr, indent)
 import EVM.Solidity
@@ -735,6 +735,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , allowFFI       = False
           , freshAddresses = 0
           , beaconRoot     = 0
+          , parentHash     = 0
+          , txdataFloorGas = defaultTxdataFloorGas
           }
         word f def = fromMaybe def (f cExecOpts)
         word64 f def = fromMaybe def (f cExecOpts)
@@ -841,6 +843,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , allowFFI       = False
       , freshAddresses = 0
       , beaconRoot     = 0
+      , parentHash     = 0
+      , txdataFloorGas = defaultTxdataFloorGas
       }
     word f def = fromMaybe def (f cExecOpts)
     word64 f def = fromMaybe def (f cExecOpts)

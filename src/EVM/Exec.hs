@@ -2,7 +2,7 @@ module EVM.Exec where
 
 import EVM hiding (createAddress)
 import EVM.Concrete (createAddress)
-import EVM.FeeSchedule (feeSchedule)
+import EVM.FeeSchedule (defaultTxdataFloorGas, feeSchedule)
 import EVM.Types
 
 import Control.Monad.Trans.State.Strict (get, State)
@@ -45,6 +45,8 @@ vmForEthrunCreation creationCode =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
+    , txdataFloorGas = defaultTxdataFloorGas
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode ""))))
 

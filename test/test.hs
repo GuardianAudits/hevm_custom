@@ -4602,6 +4602,20 @@ tests = testGroup "hevm"
             [PEq (Lit x) (Var "arg1")] -> pure x
             _ -> internalError "Expected PEq"
           assertEqualM "Must be equivalent concrete values" res1W res2W
+    , testNoSimplify "clz-smt-known-value" $ do
+      let p = PEq (Var "arg1") (Lit 1) .&& PNeg (PEq (Expr.clz (Var "arg1")) (Lit 255))
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [p]
+        case res of
+          Qed -> pure ()
+          _ -> liftIO $ assertFailure $ "CLZ(1) must be exactly 255, got " <> show res
+    , testNoSimplify "clz-smt-zero-is-unique" $ do
+      let p = PEq (Expr.clz (Var "arg1")) (Lit 256) .&& PNeg (PEq (Var "arg1") (Lit 0))
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [p]
+        case res of
+          Qed -> pure ()
+          _ -> liftIO $ assertFailure $ "Only CLZ(0) may equal 256, got " <> show res
   ]
   , testGroup "simplification-working"
   [
@@ -6126,6 +6140,7 @@ genWord litFreq sz = frequency
     , liftM2 SHL subWord subWord
     , liftM2 SHR subWord subWord
     , liftM2 SAR subWord subWord
+    , fmap CLZ subWord
     , fmap BlockHash subWord
     --, liftM3 Balance arbitrary arbitrary subWord
     --, fmap CodeSize subWord
@@ -6210,6 +6225,7 @@ genWordArith litFreq sz = frequency
     , (3 , liftM2 SHL  subWord subWord)
     , (3 , liftM2 SHR  subWord subWord)
     , (3 , liftM2 SAR  subWord subWord)
+    , (3 , fmap CLZ    subWord)
     , (3 , liftM2 Or   subWord subWord)
     -- comparisons, reducing variability greatly
     , (1 , liftM2 LEq  subWord subWord)

@@ -33,6 +33,37 @@ prelude =  SMT2 src mempty mempty
     ])
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
+    "(define-fun clz2 ((x (_ BitVec 2))) Word\
+      \(ite (= ((_ extract 1 1) x) #b1) (_ bv0 256)\
+      \(ite (= ((_ extract 0 0) x) #b1) (_ bv1 256) (_ bv2 256))))",
+    "(define-fun clz4 ((x (_ BitVec 4))) Word\
+      \(ite (= ((_ extract 3 2) x) #b00)\
+      \(bvadd (_ bv2 256) (clz2 ((_ extract 1 0) x)))\
+      \(clz2 ((_ extract 3 2) x))))",
+    "(define-fun clz8 ((x (_ BitVec 8))) Word\
+      \(ite (= ((_ extract 7 4) x) #x0)\
+      \(bvadd (_ bv4 256) (clz4 ((_ extract 3 0) x)))\
+      \(clz4 ((_ extract 7 4) x))))",
+    "(define-fun clz16 ((x (_ BitVec 16))) Word\
+      \(ite (= ((_ extract 15 8) x) #x00)\
+      \(bvadd (_ bv8 256) (clz8 ((_ extract 7 0) x)))\
+      \(clz8 ((_ extract 15 8) x))))",
+    "(define-fun clz32 ((x (_ BitVec 32))) Word\
+      \(ite (= ((_ extract 31 16) x) #x0000)\
+      \(bvadd (_ bv16 256) (clz16 ((_ extract 15 0) x)))\
+      \(clz16 ((_ extract 31 16) x))))",
+    "(define-fun clz64 ((x (_ BitVec 64))) Word\
+      \(ite (= ((_ extract 63 32) x) #x00000000)\
+      \(bvadd (_ bv32 256) (clz32 ((_ extract 31 0) x)))\
+      \(clz32 ((_ extract 63 32) x))))",
+    "(define-fun clz128 ((x (_ BitVec 128))) Word\
+      \(ite (= ((_ extract 127 64) x) #x0000000000000000)\
+      \(bvadd (_ bv64 256) (clz64 ((_ extract 63 0) x)))\
+      \(clz64 ((_ extract 127 64) x))))",
+    "(define-fun clz256 ((x Word)) Word\
+      \(ite (= ((_ extract 255 128) x) #x00000000000000000000000000000000)\
+      \(bvadd (_ bv128 256) (clz128 ((_ extract 127 0) x)))\
+      \(clz128 ((_ extract 255 128) x))))",
     "(define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))",
     "(define-fun indexWord30 ((w Word)) Byte ((_ extract 15 8) w))",
     "(define-fun indexWord29 ((w Word)) Byte ((_ extract 23 16) w))",

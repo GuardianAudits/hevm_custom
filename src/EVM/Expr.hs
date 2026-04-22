@@ -202,6 +202,23 @@ sar = op2 SAR (\x y ->
      else
        fromIntegral $ shiftR asSigned (fromIntegral x))
 
+-- | Count leading zero bits in a 256-bit word. EIP-7939 specifies that
+-- CLZ(0) returns 256.
+clz :: Expr EWord -> Expr EWord
+clz = op1 CLZ clz256
+  where
+    clz256 :: W256 -> W256
+    clz256 0 = 256
+    clz256 x = fromIntegral (255 - msb256 x)
+
+    msb256 :: W256 -> Int
+    msb256 v = go 255
+      where
+        go n
+          | n < 0 = 0
+          | testBit v n = n
+          | otherwise = go (n - 1)
+
 
 -- Props
 
@@ -252,8 +269,16 @@ readByte i@(Lit x) (WriteWord (Lit idx) val src)
            (Lit _) -> indexWord (Lit $ x - idx) val
            _ -> IndexWord (Lit $ x - idx) val
     else readByte i src
--- reading a byte that is lower than the dstOffset of a CopySlice, so it's just reading from dst
-readByte i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset > x =
+-- reading a byte that is before the CopySlice destination region, so just read from dst.
+-- We must ensure dstOffset + size does not wrap past maxBound.
+-- When size is symbolic, bound dstOffset so wrapping is impossible.
+readByte i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | dstOffset > x
+  , dstOffset <= (maxBound :: W256) - maxBytes =
+  readByte i dst
+readByte i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | dstOffset > x
+  , dstOffset + size >= dstOffset =
   readByte i dst
 readByte i@(Lit x) (CopySlice (Lit srcOffset) (Lit dstOffset) (Lit size) src dst)
   = if x - dstOffset < size
@@ -294,9 +319,28 @@ readWord idx b@(WriteWord idx' val buf)
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
--- reading a Word that is lower than the dstOffset-32 of a CopySlice, so it's just reading from dst
-readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset >= x+32 = readWord i dst
-readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst) | x >= dstOffset + size = readWord i dst
+-- reading a Word that is before the CopySlice destination region, so just read from dst.
+-- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
+-- When size is symbolic, bound dstOffset so wrapping is impossible.
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | dstOffset >= x + 32
+  , x + 32 >= x
+  , dstOffset <= (maxBound :: W256) - maxBytes =
+  readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | dstOffset >= x + 32
+  , x + 32 >= x
+  , dstOffset + size >= dstOffset =
+  readWord i dst
+-- reading a Word that is past the end of the CopySlice destination region
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | x >= dstOffset + maxBytes
+  , dstOffset + maxBytes >= dstOffset =
+  readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | x >= dstOffset + size
+  , dstOffset + size >= dstOffset =
+  readWord i dst
 readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   -- the region we are trying to read is enclosed in the sliced region
   | (idx - dstOff) < size && 32 <= size - (idx - dstOff) = readWord (Lit $ srcOff + (idx - dstOff)) src
@@ -311,10 +355,21 @@ readWord i b = readWordFromBytes i b
 readWordFromBytes :: Expr EWord -> Expr Buf -> Expr EWord
 readWordFromBytes (Lit idx) (ConcreteBuf bs) =
   case tryInto idx of
-    Left _ -> Lit 0
     Right i -> Lit $ word $ padRight 32 $ BS.take 32 $ BS.drop i bs
+    Left _ -> if noOverflow then Lit 0 else Lit . word $ wrappedBytes
+      where
+        noOverflow = idx <= (maxBound :: W256) - 31
+        wrappedBytes = zeroes <> bytesFromBeginning
+        fromEnd :: Int
+        fromEnd = fromIntegral ((maxBound :: W256) - idx + 1)
+        fromBeginning = 32 - fromEnd
+        zeroes = BS.replicate fromEnd 0
+        bytesFromBeginning = padRight 32 $ BS.take fromBeginning bs
 readWordFromBytes idx buf@(AbstractBuf _) = ReadWord idx buf
-readWordFromBytes i@(Lit idx) buf = let
+readWordFromBytes i@(Lit idx) buf
+  -- idx+31 must not wrap past maxBound. Wrapped abstract reads stay explicit.
+  | idx + 31 < idx = ReadWord i buf
+  | otherwise = let
     bytes = [readByte (Lit i') buf | i' <- [idx .. idx + 31]]
   in if all isLitByte bytes
      then Lit (bytesToW256 . mapMaybe maybeLitByteSimp $ bytes)
@@ -355,13 +410,14 @@ copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord s
 -- Fully concrete copy
 copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e@(ConcreteBuf dst)
   | dstOffset < maxBytes
-  , size < maxBytes =
-      let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
-          sl = if srcOffset > unsafeInto (BS.length src)
-            then BS.replicate (unsafeInto size) 0
-            else padRight (unsafeInto size) $ BS.take (unsafeInto size) (BS.drop (unsafeInto srcOffset) src)
-          tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
-      in ConcreteBuf $ hd <> sl <> tl
+  , size < maxBytes
+  , size == 0 || srcOffset + (size - 1) >= srcOffset =
+  let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
+      sl = if srcOffset > unsafeInto (BS.length src)
+        then BS.replicate (unsafeInto size) 0
+        else padRight (unsafeInto size) $ BS.take (unsafeInto size) (BS.drop (unsafeInto srcOffset) src)
+      tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
+  in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
 
 -- concrete indices & abstract src (may produce a concrete result if we are
@@ -1230,6 +1286,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
        | a == (Lit 0) = v
        | v == (Lit 0) = v
        | otherwise = sar a v
+    go (CLZ v) = clz v
 
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
     go (And a b)

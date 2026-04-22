@@ -54,7 +54,7 @@ import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
-import EVM.FeeSchedule (feeSchedule)
+import EVM.FeeSchedule (defaultTxdataFloorGas, feeSchedule)
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
 import EVM.Solvers (SolverGroup, checkSatWithProps)
@@ -261,6 +261,8 @@ loadEmptySymVM x callvalue cd =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
+    , txdataFloorGas = defaultTxdataFloorGas
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -298,6 +300,8 @@ loadSymVM x callvalue cd create =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
+    , txdataFloorGas = defaultTxdataFloorGas
     })
 
 -- freezes any mutable refs, making it safe to share between threads

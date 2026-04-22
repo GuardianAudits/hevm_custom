@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
@@ -25,7 +25,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as Lazy
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
+import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
@@ -50,6 +50,7 @@ data Block = Block
   , timestamp   :: W256
   , txs         :: [Transaction]
   , beaconRoot  :: W256
+  , parentHash  :: W256
   } deriving Show
 
 data BlockchainContract = BlockchainContract
@@ -292,9 +293,11 @@ instance FromJSON Block where
     timestamp  <- wordField v' "timestamp"
     mixHash    <- wordField v' "mixHash"
     beaconRoot <- fmap read <$> v' .:? "parentBeaconBlockRoot"
+    parentHash <- wordField v' "parentHash"
     pure $ Block { coinbase, difficulty, mixHash, gasLimit
                  , baseFee = fromMaybe 0 baseFee, number, timestamp
                  , txs, beaconRoot = fromMaybe 0 beaconRoot
+                 , parentHash
                  }
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
@@ -350,6 +353,9 @@ fromBlockchainCase (BlockchainCase blocks preState postState network) =
 maxCodeSize :: W256
 maxCodeSize = 24576
 
+maxTxGasLimit :: Word64
+maxTxGasLimit = 2 ^ (24 :: Int)
+
 fromBlockchainCase' :: Block -> Transaction
                        -> BlockchainContracts -> BlockchainContracts
                        -> Either BlockchainError Case
@@ -386,6 +392,8 @@ fromBlockchainCase' block tx preState postState =
        , allowFFI       = False
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
+       , parentHash     = block.parentHash
+       , txdataFloorGas = txdataFloorGas feeSchedule tx
        })
       checkState
       postState
@@ -426,22 +434,10 @@ maxBaseFee tx =
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
 checkTx tx block prestate = do
-  origin <- sender tx
   validateTx tx block prestate
-  if (isJust tx.toAddr) then pure prestate
-  else
-    let senderNonce = (.nonce) <$> Map.lookup origin prestate
-        addr  = case EVM.createAddress origin (fromJust senderNonce) of
-                  (LitAddr a) -> a
-                  _ -> internalError "Cannot happen"
-        freshContract = BlockchainContract (ByteStringS "") 0 0 mempty
-        (BlockchainContract (ByteStringS b) prevNonce _ _) = (fromMaybe freshContract $ Map.lookup addr prestate)
-        nonEmptyAccount = not (BS.null b)
-        badNonce = prevNonce /= 0
-        initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
-    in
-    if (badNonce || nonEmptyAccount || initCodeSizeExceeded) then mzero
-    else pure prestate
+  let initCodeSizeExceeded = isNothing tx.toAddr
+        && BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
+  if initCodeSizeExceeded then mzero else pure prestate
 
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
@@ -449,7 +445,8 @@ validateTx tx block cs = do
   originBalance <- (.balance) <$> Map.lookup origin cs
   originNonce <- (.nonce) <$> Map.lookup origin cs
   let gasDeposit = (effectiveprice tx block.baseFee) * (into tx.gasLimit)
-  if gasDeposit + tx.value <= originBalance
+  if tx.gasLimit <= maxTxGasLimit
+    && gasDeposit + tx.value <= originBalance
     && ((unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
   then Just ()
   else Nothing
@@ -462,6 +459,7 @@ vmForCase x = do
     -- TODO: we need to call this again because we override contracts in the
     -- previous line
     <&> setEIP4788Storage x.vmOpts
+    <&> setEIP2935Storage x.vmOpts
   pure $ initTx vm
 
 forceConcreteAddrs :: Map (Expr EAddr) Contract -> Map Addr Contract
