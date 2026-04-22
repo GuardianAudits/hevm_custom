@@ -270,6 +270,7 @@ data Expr (a :: EType) where
   SHL            :: Expr EWord -> Expr EWord -> Expr EWord
   SHR            :: Expr EWord -> Expr EWord -> Expr EWord
   SAR            :: Expr EWord -> Expr EWord -> Expr EWord
+  CLZ            :: Expr EWord -> Expr EWord  -- EIP-7939: Count leading zeros (Osaka)
 
   -- Hashes
 
@@ -1057,6 +1058,7 @@ data GenericOp a
   | OpShl
   | OpShr
   | OpSar
+  | OpClz  -- EIP-7939: Count leading zeros (Osaka)
   | OpSha3
   | OpAddress
   | OpBalance

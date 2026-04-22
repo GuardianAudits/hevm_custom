@@ -202,6 +202,21 @@ sar = op2 SAR (\x y ->
      else
        fromIntegral $ shiftR asSigned (fromIntegral x))
 
+-- EIP-7939: Count leading zeros (Osaka)
+-- Returns the number of leading zero bits in a 256-bit word (0-256)
+clz :: Expr EWord -> Expr EWord
+clz = op1 CLZ clz256
+  where
+    clz256 :: W256 -> W256
+    clz256 0 = 256
+    clz256 x = fromIntegral (255 - msb256 x)
+    msb256 :: W256 -> Int
+    msb256 v = go 255
+      where
+        go n | n < 0       = 0
+             | testBit v n = n
+             | otherwise   = go (n - 1)
+
 
 -- Props
 

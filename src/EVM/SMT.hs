@@ -486,6 +486,10 @@ exprToSMT = \case
   SHL a b -> op2 "bvshl" b a
   SHR a b -> op2 "bvlshr" b a
   SAR a b -> op2 "bvashr" b a
+  -- EIP-7939: CLZ - use uninterpreted function for now (SMT-LIB has no native CLZ)
+  CLZ a -> do
+    aExp <- exprToSMT a
+    pure $ "(" <> "clz256 " <> aExp <> ")"
   SEx a b -> op2 "signext" a b
   Div a b -> op2CheckZero "bvudiv" a b
   SDiv a b -> op2CheckZero "bvsdiv" a b
