@@ -314,7 +314,7 @@ showTrace trace =
         _ ->
           "\x1b[91merror\x1b[0m " <> pack (show e) <> pos
 
-    ReturnTrace out (CallContext { abi = Just abi }) ->
+    ReturnTrace out (TraceCallContext { traceAbi = Just abi }) ->
       "← " <>
         case Map.lookup (unsafeInto abi) dapp.abiMap of
           Just m  ->
@@ -325,18 +325,22 @@ showTrace trace =
                 showValues ts out
           Nothing ->
             formatSBinary out
-    ReturnTrace out (CallContext {}) ->
+    ReturnTrace out (TraceCallContext {}) ->
       "← " <> formatSBinary out
-    ReturnTrace out (CreationContext {}) ->
+    ReturnTrace out (TraceCreationContext {}) ->
       let l = Expr.bufLength out
       in "← " <> formatExpr l <> " bytes of code"
+    CreationReturnTrace len (TraceCreationContext {}) ->
+      "← " <> formatExpr len <> " bytes of code"
+    CreationReturnTrace len (TraceCallContext {}) ->
+      "← " <> formatExpr len <> " bytes"
     EntryTrace t ->
       t
-    FrameTrace (CreationContext { address }) ->
+    FrameTrace (TraceCreationContext { traceAddress = address }) ->
       "create "
       <> ppAddr address True
       <> pos
-    FrameTrace (CallContext { target, context, abi, calldata }) ->
+    FrameTrace (TraceCallContext { traceTarget = target, traceCallerContext = context, traceAbi = abi, traceCalldata = calldata }) ->
       let calltype = if target == context
                      then "call "
                      else "delegatecall "

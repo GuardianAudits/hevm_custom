@@ -119,7 +119,17 @@ unitTestMethods prefix =
   >>> mapMaybe (mkSig prefix)
 
 traceSrcMap :: DappInfo -> Trace -> Maybe SrcMap
-traceSrcMap dapp trace = srcMap dapp trace.contract trace.opIx
+traceSrcMap dapp trace = srcMapTrace dapp trace.contract trace.opIx
+
+srcMapTrace :: DappInfo -> TraceContract -> Int -> Maybe SrcMap
+srcMapTrace dapp contr opIndex = do
+  sol <- findSrcTrace contr dapp
+  case contr.traceContractCode of
+    UnknownCode _ -> Nothing
+    InitCode _ _ ->
+     Seq.lookup opIndex sol.creationSrcmap
+    RuntimeCode _ ->
+      Seq.lookup opIndex sol.runtimeSrcmap
 
 srcMap :: DappInfo -> Contract -> Int -> Maybe SrcMap
 srcMap dapp contr opIndex = do
@@ -138,6 +148,12 @@ findSrc c dapp = do
     Just (_, v) -> Just v
     Nothing -> lookupCode c.code dapp
 
+findSrcTrace :: TraceContract -> DappInfo -> Maybe SolcContract
+findSrcTrace c dapp = do
+  hash <- maybeLitWordSimp c.traceContractCodehash
+  case Map.lookup hash dapp.solcByHash of
+    Just (_, v) -> Just v
+    Nothing -> lookupCode c.traceContractCode dapp
 
 lookupCode :: ContractCode -> DappInfo -> Maybe SolcContract
 lookupCode (UnknownCode _) _ = Nothing
