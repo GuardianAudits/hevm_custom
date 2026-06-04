@@ -291,7 +291,7 @@ initTx vm =
          $ preState
   in
     vm & #env % #contracts .~ initState
-       & #tx % #txReversion .~ preState
+       & #tx % #txReversion .~ initialReversion preState
        & (if hasCollision
           then #state % #code .~ RuntimeCode (ConcreteRuntimeCode "")
           else id)

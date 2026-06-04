@@ -43,8 +43,10 @@ import Data.DoubleWord.TH
 import Data.Foldable (Foldable(..))
 import Data.Hashable (Hashable)
 import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Serialize qualified as Cereal
@@ -687,6 +689,7 @@ data VM (t :: VMType) = VM
   , tx             :: TxState
   , logs           :: [Expr Log]
   , traces         :: Zipper.TreePos Zipper.Empty Trace
+  , traceEnabled   :: Bool
   , pathsVisited   :: PathsVisited
   , burned         :: !(Gas t)
   , iterations     :: Map CodeLocation (Int, [Expr EWord])
@@ -761,7 +764,7 @@ data FrameContext
   = CreationContext
     { address         :: Expr EAddr
     , codehash        :: Expr EWord
-    , createreversion :: Map (Expr EAddr) Contract
+    , createreversion :: ContractReversion
     , subState        :: SubState
     }
   | CallContext
@@ -772,9 +775,69 @@ data FrameContext
     , codehash      :: Expr EWord
     , abi           :: Maybe W256
     , calldata      :: Expr Buf
-    , callreversion :: Map (Expr EAddr) Contract
+    , callreversion :: ContractReversion
     , subState      :: SubState
     }
+  deriving (Eq, Ord, Show, Generic)
+
+data ContractReversion = ContractReversion
+  { reversionOriginals :: Map (Expr EAddr) (Maybe Contract)
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+initialReversion :: Map (Expr EAddr) Contract -> ContractReversion
+initialReversion _ = emptyReversion
+
+emptyReversion :: ContractReversion
+emptyReversion = ContractReversion mempty
+
+rememberReversion :: Expr EAddr -> Maybe Contract -> ContractReversion -> ContractReversion
+rememberReversion addr original rev@(ContractReversion originals)
+  | addr `Map.member` originals = rev
+  | otherwise = ContractReversion (Map.insert addr original originals)
+
+mergeReversion :: ContractReversion -> ContractReversion -> ContractReversion
+mergeReversion (ContractReversion parent) (ContractReversion child) =
+  ContractReversion (Map.union parent child)
+
+restoreReversion :: ContractReversion -> Map (Expr EAddr) Contract -> Map (Expr EAddr) Contract
+restoreReversion (ContractReversion originals) current =
+  Map.foldlWithKey' restore current originals
+  where
+    restore contracts addr = \case
+      Just contract -> Map.insert addr contract contracts
+      Nothing -> Map.delete addr contracts
+
+-- | Call/create metadata retained for traces. Unlike 'FrameContext', this
+-- intentionally omits rollback state so printable traces do not keep full
+-- world-state snapshots alive.
+data TraceFrameContext
+  = TraceCreationContext
+    { traceAddress       :: Expr EAddr
+    , traceFrameCodehash :: Expr EWord
+    }
+  | TraceCallContext
+    { traceTarget        :: Expr EAddr
+    , traceCallerContext :: Expr EAddr
+    , traceOutOffset     :: Expr EWord
+    , traceOutSize       :: Expr EWord
+    , traceFrameCodehash :: Expr EWord
+    , traceAbi           :: Maybe W256
+    , traceCalldata      :: Expr Buf
+    }
+  deriving (Eq, Ord, Show, Generic)
+
+traceFrameContext :: FrameContext -> TraceFrameContext
+traceFrameContext = \case
+  CreationContext { address, codehash } ->
+    TraceCreationContext address codehash
+  CallContext { target, context, offset, size, codehash, abi, calldata } ->
+    TraceCallContext target context offset size codehash abi calldata
+
+data TraceContract = TraceContract
+  { traceContractCode     :: ContractCode
+  , traceContractCodehash :: Expr EWord
+  }
   deriving (Eq, Ord, Show, Generic)
 
 -- | The "accrued substate" across a transaction
@@ -836,7 +899,7 @@ data TxState = TxState
   , value       :: Expr EWord
   , subState    :: SubState
   , isCreate    :: Bool
-  , txReversion :: Map (Expr EAddr) Contract
+  , txReversion :: ContractReversion
   , txdataFloorGas :: Word64
   }
   deriving (Show)
@@ -963,17 +1026,18 @@ instance Show RuntimeCode
 
 data Trace = Trace
   { opIx      :: Int
-  , contract  :: Contract
+  , contract  :: TraceContract
   , tracedata :: TraceData
   }
   deriving (Eq, Ord, Show, Generic)
 
 data TraceData
   = EventTrace (Expr EWord) (Expr Buf) [Expr EWord]
-  | FrameTrace FrameContext
+  | FrameTrace TraceFrameContext
   | ErrorTrace EvmError
   | EntryTrace Text
-  | ReturnTrace (Expr Buf) FrameContext
+  | ReturnTrace (Expr Buf) TraceFrameContext
+  | CreationReturnTrace (Expr EWord) TraceFrameContext
   deriving (Eq, Ord, Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly

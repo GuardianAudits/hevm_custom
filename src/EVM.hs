@@ -133,11 +133,12 @@ makeVm o = do
       , value = o.value
       , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty False mempty mempty
       , isCreate = o.create
-      , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , txReversion = initialReversion $ Map.fromList ((o.address,o.contract):o.otherContracts)
       , txdataFloorGas = o.txdataFloorGas
       }
     , logs = []
     , traces = Zipper.fromForest []
+    , traceEnabled = True
     , block = block
     , state = FrameState
       { pc = 0
@@ -794,6 +795,7 @@ exec1 conf = do
                     Just slot -> recordStorageWrite self slot
                   next
                   assign' (#state % #stack) xs
+                  recordContractForReversion self
                   modifying (#env % #contracts % ix self % #storage) (writeStorage x new)
 
                 concreteSstore :: EVM t () = do
@@ -841,6 +843,7 @@ exec1 conf = do
             x:new:xs ->
               burn g_sload $ do
                 next
+                recordContractForReversion self
                 modifying (#env % #contracts % ix self % #tStorage) (writeStorage x new)
                 assign' (#state % #stack) xs
             _ -> underrun
@@ -1077,6 +1080,8 @@ exec1 conf = do
                     if hasFunds
                     then fetchAccount xTo $ \_ -> do
                       when (createdThisTr || xTo /= self) $ do
+                        recordContractForReversion xTo
+                        recordContractForReversion self
                         #env % #contracts % ix xTo % #balance %= (Expr.add funds)
                         assign (#env % #contracts % ix self % #balance) (Lit 0)
                       doStop
@@ -1105,6 +1110,8 @@ transfer src dst val = do
       branch (?conf).maxDepth (Expr.gt val srcBal) $ \case
         True -> vmError $ BalanceTooLow val srcBal
         False -> do
+          recordContractForReversion src
+          recordContractForReversion dst
           (#env % #contracts % ix src % #balance) %= (`Expr.sub` val)
           (#env % #contracts % ix dst % #balance) %= (`Expr.add` val)
     -- sender not in state
@@ -1123,6 +1130,32 @@ transfer src dst val = do
           transfer src dst val
         SymAddr _ -> unexpectedSymArg "Attempting to transfer eth to a symbolic address that is not present in the state" [dst]
         GVar _ -> internalError "Unexpected GVar"
+
+recordContractForReversion :: Expr EAddr -> EVM t ()
+recordContractForReversion addr = do
+  original <- use (#env % #contracts % at addr)
+  modifying (#tx % #txReversion) (rememberReversion addr original)
+  modifying #frames $ \case
+    [] -> []
+    frame : rest -> over #context (rememberFrameReversion addr original) frame : rest
+  where
+    rememberFrameReversion a original = \case
+      ctx@CreationContext { createreversion } ->
+        ctx { createreversion = rememberReversion a original createreversion }
+      ctx@CallContext { callreversion } ->
+        ctx { callreversion = rememberReversion a original callreversion }
+
+mergeReversionIntoParentFrame :: ContractReversion -> EVM t ()
+mergeReversionIntoParentFrame childReversion =
+  modifying #frames $ \case
+    [] -> []
+    frame : rest -> over #context (mergeFrameReversion childReversion) frame : rest
+  where
+    mergeFrameReversion child = \case
+      ctx@CreationContext { createreversion } ->
+        ctx { createreversion = mergeReversion createreversion child }
+      ctx@CallContext { callreversion } ->
+        ctx { callreversion = mergeReversion callreversion child }
 
 -- | Checks a *CALL for failure; OOG, too many callframes, memory access etc.
 callChecks
@@ -1180,6 +1213,7 @@ callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize x
               let contract = case vm.config.baseState of
                     AbstractBase -> unknownContract from
                     EmptyBase -> emptyContract
+              recordContractForReversion from
               (#env % #contracts) %= (Map.insert from contract)
               -- run callChecks again
               callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue
@@ -1443,6 +1477,7 @@ fetchAccountWithFallback addr fallback continue =
         base <- use (#config % #baseState)
         assign (#result) . Just . HandleEffect . Query $
           PleaseFetchContract a base $ \c -> do
+            recordContractForReversion addr
             assign (#env % #contracts % at addr) (Just c)
             assign #result Nothing
             continue c
@@ -1491,10 +1526,12 @@ accessStorage addr slot continue = do
           -- Symbolic address that cannot be cajoled/solved into a concrete one
           -- We cannot query the underlying storage, as we don't know which one to query
           -- So we store and return 0, as it is the only sound option
+          recordContractForReversion addr
           modifying (#env % #contracts % ix addr % #storage) (writeStorage slot (Lit 0))
           continue $ Lit 0
       mkQuery :: Addr -> W256 -> EVM t ()
       mkQuery a s = query $ PleaseFetchSlot a s $ \x -> do
+        recordContractForReversion (LitAddr a)
         modifying (#env % #contracts % ix (LitAddr a) % #storage) (writeStorage (Lit s) (Lit x))
         assign #result Nothing
         continue $ Lit x
@@ -1553,7 +1590,10 @@ addAliasConstraints = do
 finalize :: VMOps t => EVM t ()
 finalize = do
   let
-    revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
+    revertContracts  = do
+      reversion <- use (#tx % #txReversion)
+      contracts <- use (#env % #contracts)
+      assign (#env % #contracts) (restoreReversion reversion contracts)
     revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty False mempty mempty)
 
   addAliasConstraints
@@ -1614,6 +1654,7 @@ finalize = do
   modifying (#env % #contracts)
     (Map.filterWithKey
       (\k a -> not ((k `elem` touchedAddresses) && accountEmpty a)))
+  assign (#tx % #txReversion) emptyReversion
 
 -- | Loads the selected contract as the current contract to execute
 loadContract :: Expr EAddr -> State (VM t) ()
@@ -1650,6 +1691,7 @@ touchAddress addr = do
   let mkc = case baseState of
               AbstractBase -> unknownContract
               EmptyBase -> const emptyContract
+  recordContractForReversion addr
   (#env % #contracts) %= (Map.insertWith (\_ e -> e) addr (mkc addr))
 
 onlyDeployed :: forall t . (?conf :: Config, VMOps t, Typeable t) =>
@@ -1837,9 +1879,9 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
   input <- readMemory (Expr.add inOffset (Lit 4)) (Expr.sub inSize (Lit 4))
   calldata <- readMemory inOffset inSize
   abi <- readBytes 4 (Lit 0) <$> readMemory inOffset (Lit 4)
-  let newContext = CallContext cheatCode cheatCode outOffset outSize (Lit 0) (maybeLitWordSimp abi) calldata vm.env.contracts vm.tx.subState
+  let newContext = CallContext cheatCode cheatCode outOffset outSize (Lit 0) (maybeLitWordSimp abi) calldata (initialReversion vm.env.contracts) vm.tx.subState
 
-  pushTrace $ FrameTrace newContext
+  pushTrace $ FrameTrace (traceFrameContext newContext)
   next
   vm1 <- get
   burn' gas $ pushTo #frames $ Frame
@@ -1939,6 +1981,7 @@ cheatActions = Map.fromList
         [a, amt] ->
           forceAddr a (unexpectedSymArgW "vm.deal: cannot decode target into an address") $ \usr ->
             fetchAccount usr $ \_ -> do
+              recordContractForReversion usr
               assign (#env % #contracts % ix usr % #balance) amt
               doStop
         _ -> vmError (BadCheatCode "deal(address,uint256) parameter decoding failed" sig)
@@ -2018,6 +2061,7 @@ cheatActions = Map.fromList
       \sig input -> case decodeStaticArgs 0 3 input of
         [a, slot, new] -> case wordToAddr a of
           Just a'@(LitAddr _) -> fetchAccount a' $ \_ -> do
+            recordContractForReversion a'
             modifying (#env % #contracts % ix a' % #storage) (writeStorage slot new)
             doStop
           _ -> vmError (BadCheatCode "store(address,bytes32,bytes32) issue, address provided may not be an address?" sig)
@@ -2425,6 +2469,7 @@ cheatActions = Map.fromList
     storeSlot :: VMOps t => Addr -> W256 -> W256 -> EVM t ()
     storeSlot token slot val =
       fetchAccount (LitAddr token) $ \_ -> do
+        recordContractForReversion (LitAddr token)
         modifying (#env % #contracts % ix (LitAddr token) % #storage) (writeStorage (Lit slot) (Lit val))
 
     -- Run a STATICCALL (depth=0) in a nested VM, returning:
@@ -2537,6 +2582,7 @@ cheatActions = Map.fromList
         query $ PleaseFetchContract addr base $ \c -> do
           assign #result Nothing
           -- Cache in outer env like `fetchAccountWithFallback` does.
+          recordContractForReversion (LitAddr addr)
           assign (#env % #contracts % at (LitAddr addr)) (Just c)
           nested' <- lift $ execStateT (k c) nested
           runNestedVM nested' cont
@@ -2544,6 +2590,7 @@ cheatActions = Map.fromList
         query $ PleaseFetchSlot addr slot $ \x -> do
           assign #result Nothing
           -- Cache in outer env like `accessStorage` does.
+          recordContractForReversion (LitAddr addr)
           modifying (#env % #contracts % ix (LitAddr addr) % #storage) (writeStorage (Lit slot) (Lit x))
           nested' <- lift $ execStateT (k x) nested
           runNestedVM nested' cont
@@ -2812,12 +2859,12 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                             , offset    = xOutOffset
                             , size      = xOutSize
                             , codehash  = target.codehash
-                            , callreversion = vm0.env.contracts
+                            , callreversion = initialReversion vm0.env.contracts
                             , subState  = vm0.tx.subState
                             , abi
                             , calldata
                             }
-          pushTrace (FrameTrace newContext)
+          pushTrace (FrameTrace (traceFrameContext newContext))
           next
           vm1 <- get
           pushTo #frames $ Frame
@@ -2895,6 +2942,7 @@ create self this xSize xGas xValue xs newAddr initCode = do
   then burn' xGas $ do
     assign' (#state % #stack) (Lit 0 : xs)
     assign (#state % #returndata) mempty
+    recordContractForReversion self
     modifying (#env % #contracts % ix self % #nonce) (fmap ((+) 1))
     next
   -- do we have enough balance
@@ -2913,13 +2961,18 @@ create self this xSize xGas xValue xs newAddr initCode = do
           Just c -> do
             let
               newContract = initialContract c
+              createReversion =
+                rememberReversion newAddr (Map.lookup newAddr vm0.env.contracts) $
+                  initialReversion vm0.env.contracts
               newContext  =
                 CreationContext { address   = newAddr
                                 , codehash  = newContract.codehash
-                                , createreversion = vm0.env.contracts
+                                , createreversion = createReversion
                                 , subState  = vm0.tx.subState
                                 }
 
+            recordContractForReversion newAddr
+            recordContractForReversion self
             zoom (#env % #contracts) $ do
               oldAcc <- use (at newAddr)
               let oldBal = maybe (Lit 0) (.balance) oldAcc
@@ -2942,7 +2995,7 @@ create self this xSize xGas xValue xs newAddr initCode = do
 
             transfer self newAddr xValue
 
-            pushTrace (FrameTrace newContext)
+            pushTrace (FrameTrace (traceFrameContext newContext))
             next
             vm1 <- get
             pushTo #frames $ Frame
@@ -2985,7 +3038,8 @@ parseInitCode buf = if V.null conc
 -- | Replace a contract's code, like when CREATE returns
 -- from the constructor code.
 replaceCode :: Expr EAddr -> ContractCode -> EVM t ()
-replaceCode target newCode =
+replaceCode target newCode = do
+  recordContractForReversion target
   zoom (#env % #contracts % at target) $
     get >>= \case
       Just now -> case now.code of
@@ -3005,7 +3059,8 @@ replaceCode target newCode =
         internalError "Can't replace code of nonexistent contract"
 
 replaceCodeEtch :: Expr EAddr -> ContractCode -> EVM t ()
-replaceCodeEtch target newCode =
+replaceCodeEtch target newCode = do
+  recordContractForReversion target
   zoom (#env % #contracts % at target) $
     get >>= \case
       Just now -> case now.code of
@@ -3081,7 +3136,10 @@ finishFrame how = do
 
       -- Insert a debug trace.
       insertTrace $ case how of
-        FrameReturned output -> ReturnTrace output nextFrame.context
+        FrameReturned output ->
+          case nextFrame.context of
+            CreationContext {} -> CreationReturnTrace (bufLength output) (traceFrameContext nextFrame.context)
+            CallContext {} -> ReturnTrace output (traceFrameContext nextFrame.context)
         FrameReverted e -> ErrorTrace (Revert e)
         FrameErrored e -> ErrorTrace e
       -- Pop to the previous level of the debug trace stack.
@@ -3110,12 +3168,15 @@ finishFrame how = do
 
           let
             subState'' = over #touchedAccounts (maybe id cons (find (LitAddr 3 ==) touched)) subState'
-            revertContracts = assign (#env % #contracts) reversion
+            revertContracts = do
+              contracts <- use (#env % #contracts)
+              assign (#env % #contracts) (restoreReversion reversion contracts)
             revertSubstate  = assign (#tx % #subState) subState''
 
           case how of
             -- Case 1: Returning from a call?
             FrameReturned output -> do
+              mergeReversionIntoParentFrame reversion
               assign (#state % #returndata) output
               copyCallBytesToMemory output outSize outOffset
               reclaimRemainingGasAllowance oldVm
@@ -3141,15 +3202,17 @@ finishFrame how = do
           creator <- use (#state % #contract)
           let
             createe = oldVm.state.contract
-            revertContracts = assign (#env % #contracts) reversion'
+            revertContracts = do
+              contracts <- use (#env % #contracts)
+              assign (#env % #contracts) (Map.adjust (over #nonce (fmap ((+) 1))) creator (restoreReversion reversion contracts))
             revertSubstate  = assign (#tx % #subState) subState'
 
             -- persist the nonce through the reversion
-            reversion' = (Map.adjust (over #nonce (fmap ((+) 1))) creator) reversion
 
           case how of
             -- Case 4: Returning during a creation?
             FrameReturned output -> do
+              mergeReversionIntoParentFrame reversion
               let onContractCode contractCode = do
                     replaceCode createe contractCode
                     assign (#state % #returndata) mempty
@@ -3294,28 +3357,34 @@ withTraceLocation x = do
   let this = fromJust $ currentContract vm
   pure Trace
     { tracedata = x
-    , contract = this
+    , contract = TraceContract this.code this.codehash
     , opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
     }
 
 pushTrace :: TraceData -> EVM t ()
 pushTrace x = do
-  trace <- withTraceLocation x
-  modifying #traces $
-    \t -> Zipper.children $ Zipper.insert (Node trace []) t
+  enabled <- use #traceEnabled
+  when enabled $ do
+    trace <- withTraceLocation x
+    modifying #traces $
+      \t -> Zipper.children $ Zipper.insert (Node trace []) t
 
 insertTrace :: TraceData -> EVM t ()
 insertTrace x = do
-  trace <- withTraceLocation x
-  modifying #traces $
-    \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
+  enabled <- use #traceEnabled
+  when enabled $ do
+    trace <- withTraceLocation x
+    modifying #traces $
+      \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
 
 popTrace :: EVM t ()
-popTrace =
-  modifying #traces $
-    \t -> case Zipper.parent t of
-            Nothing -> internalError "internal internalError(trace root)"
-            Just t' -> Zipper.nextSpace t'
+popTrace = do
+  enabled <- use #traceEnabled
+  when enabled $
+    modifying #traces $
+      \t -> case Zipper.parent t of
+              Nothing -> internalError "internal internalError(trace root)"
+              Just t' -> Zipper.nextSpace t'
 
 zipperRootForest :: Zipper.TreePos Zipper.Empty a -> Forest a
 zipperRootForest z =
@@ -3341,9 +3410,11 @@ traceContext (GVar {}) = internalError"Internal Error: Unexpected GVar"
 traceTopLog :: [Expr Log] -> EVM t ()
 traceTopLog [] = noop
 traceTopLog ((LogEntry addr bytes topics) : _) = do
-  trace <- withTraceLocation (EventTrace addr bytes topics)
-  modifying #traces $
-    \t -> Zipper.nextSpace (Zipper.insert (Node trace []) t)
+  enabled <- use #traceEnabled
+  when enabled $ do
+    trace <- withTraceLocation (EventTrace addr bytes topics)
+    modifying #traces $
+      \t -> Zipper.nextSpace (Zipper.insert (Node trace []) t)
 traceTopLog ((GVar _) : _) = internalError "unexpected global variable"
 
 -- * Stack manipulation
