@@ -1655,6 +1655,15 @@ finalize = do
     (Map.filterWithKey
       (\k a -> not ((k `elem` touchedAddresses) && accountEmpty a)))
   assign (#tx % #txReversion) emptyReversion
+  clearConcreteExecutionCaches
+
+clearConcreteExecutionCaches :: VMOps t => EVM t ()
+clearConcreteExecutionCaches =
+  whenSymbolicElse (pure ()) $ do
+    assign #keccakPreImgs mempty
+    assign #pathsVisited mempty
+    assign #iterations mempty
+    assign #constraints mempty
 
 -- | Loads the selected contract as the current contract to execute
 loadContract :: Expr EAddr -> State (VM t) ()
@@ -3085,6 +3094,7 @@ resetState :: VMOps t => EVM t ()
 resetState = do
   state <- lift blankState
   modify' $ \vm -> vm { result = Nothing, frames = [], state }
+  clearConcreteExecutionCaches
 
 -- * VM error implementation
 
