@@ -2873,7 +2873,7 @@ delegationTarget :: ContractCode -> Maybe (Expr EAddr)
 delegationTarget (RuntimeCode (ConcreteRuntimeCode bs))
   | BS.length bs == 23
   , BS.take 3 bs == BS.pack [0xef, 0x01, 0x00]
-  = Just (LitAddr (truncateToAddr (word256 (BS.drop 3 bs))))
+  = Just (LitAddr (truncateToAddr (word (BS.drop 3 bs))))
 delegationTarget _ = Nothing
 
 -- -- * Contract creation
