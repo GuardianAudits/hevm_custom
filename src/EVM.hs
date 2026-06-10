@@ -2794,15 +2794,34 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           resetCaller <- use $ #state % #resetCaller
           when resetCaller $ assign (#state % #overrideCaller) Nothing
           vm0 <- get
-          fetchAccountWithFallback xTo (betterFallback xGas vm0) $ \target -> case target.code of
-              UnknownCode _ -> betterFallback xGas vm0 xTo
-              _ -> actualCall target xTo xGas vm0
+          fetchAccountWithFallback xTo (betterFallback xGas vm0) $ \target ->
+            case delegationTarget target.code of
+              -- EIP-7702: a delegated EOA (code @0xef0100 ‖ delegate@) executes the
+              -- delegate's code while keeping itself as the storage/value account, i.e. a
+              -- DELEGATECALL-style split: state.code/codeContract come from the delegate,
+              -- but state.contract (set by the OpCall continuation) stays the EOA.
+              Just delegate ->
+                fetchAccount delegate $ \delegateAcct -> case delegateAcct.code of
+                  -- Cannot resolve the delegate's code (abstract base state); fall back to
+                  -- the ordinary path rather than risk running undefined code.
+                  UnknownCode _ -> actualCall target xTo xGas vm0
+                  _ -> actualCallWith delegateAcct.code delegate target xTo xGas vm0
+              Nothing -> case target.code of
+                UnknownCode _ -> betterFallback xGas vm0 xTo
+                _ -> actualCall target xTo xGas vm0
   where
     betterFallback :: Gas t -> (VM t) -> Expr 'EAddr -> EVM t ()
     betterFallback xGas vm0 addr = onlyDeployed (forceEAddrToEWord addr) (fallback . forceEWordToEAddr) $ \a -> do
         let target = fromJust $ Map.lookup a vm0.env.contracts
         actualCall target a xGas vm0
-    actualCall target addr xGas vm0 = do
+    -- Ordinary call: execute the target's own code under its own address.
+    actualCall target addr xGas vm0 =
+        actualCallWith target.code addr target addr xGas vm0
+    -- Enter a call frame executing @execCode@ labelled with @execContract@ (its opIxMap
+    -- drives JUMPDEST validation), while @addr@ remains the storage/value account and
+    -- @target@ supplies the call-context codehash. For EIP-7702, @execCode@/@execContract@
+    -- are the delegate's; for ordinary calls they equal the target's own code/address.
+    actualCallWith execCode execContract target addr xGas vm0 = do
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
@@ -2833,8 +2852,8 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           zoom #state $ do
             assign #gas xGas
             assign #pc 0
-            assign #code (clearInitCode target.code)
-            assign #codeContract addr
+            assign #code (clearInitCode execCode)
+            assign #codeContract execContract
             assign #stack mempty
             assign #memory newMemory
             assign #memorySize 0
@@ -2843,6 +2862,19 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
             assign #overrideCaller Nothing
             assign #resetCaller False
           continue addr
+
+-- | EIP-7702 delegation designator. An account whose runtime code is exactly
+-- @0xef 0x01 0x00 ‖ <20-byte address>@ (23 bytes) delegates execution to that
+-- address. Returns the delegate address when the code is such a designator.
+-- Only concrete code can carry a designator (EIP-3541 forbids deploying any
+-- @0xef@-prefixed code, so the byte sequence can only originate from a 7702
+-- authorization), hence this never produces false positives on pre-Prague forks.
+delegationTarget :: ContractCode -> Maybe (Expr EAddr)
+delegationTarget (RuntimeCode (ConcreteRuntimeCode bs))
+  | BS.length bs == 23
+  , BS.take 3 bs == BS.pack [0xef, 0x01, 0x00]
+  = Just (LitAddr (truncateToAddr (word256 (BS.drop 3 bs))))
+delegationTarget _ = Nothing
 
 -- -- * Contract creation
 
